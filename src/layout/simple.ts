@@ -25,7 +25,7 @@ export class SimpleLayoutEngine implements LayoutEngine {
   }
 
   layout(diagram: FloeDiagram): LayoutResult {
-    // Empty diagram: minimal SVG size, deterministic (include groups empty)
+    // An empty diagram still reports a minimal deterministic canvas.
     if (diagram.nodes.length === 0 && (diagram.groups?.length ?? 0) === 0) {
       return {
         diagram,
@@ -47,7 +47,8 @@ export class SimpleLayoutEngine implements LayoutEngine {
     const nodeSizes = new Map<string, { w: number; h: number }>();
     for (const n of diagram.nodes) {
       const label = n.label ?? n.id;
-      const size = estimateNodeSize(label, n.type, this.opts);
+      const fs = typeof (n as any).style?.fontSize === "number" ? (n as any).style.fontSize : 12;
+      const size = estimateNodeSize(label, n.type, this.opts, fs);
       nodeSizes.set(n.id, size);
     }
 
@@ -60,12 +61,34 @@ export class SimpleLayoutEngine implements LayoutEngine {
       rankGroups.set(rank, arr);
     }
     const sortedRanks = Array.from(rankGroups.keys()).sort((a, b) => a - b);
+    /**
+    Group-clustered barycenter ordering, deterministic.
+    Ungrouped diagrams stay alphabetical; grouped members stay together;
+    one barycenter pass reduces crossings while keeping ties stable.
+    */
+    const groupOf = this.buildTopGroupMap(diagram.groups ?? []);
     for (const r of sortedRanks) {
-      rankGroups.get(r)!.sort((a, b) => a.localeCompare(b));
+      rankGroups.get(r)!.sort((a, b) => {
+        const ga = groupOf.get(a) ?? "";
+        const gb = groupOf.get(b) ?? "";
+        if (ga !== gb) return ga.localeCompare(gb);
+        return a.localeCompare(b);
+      });
     }
+    this.applyBarycenter(rankGroups, sortedRanks, edgesSorted, groupOf);
 
-    const tbPositions = this.assignTbPositions(rankGroups, sortedRanks, nodeSizes);
-    const positioned = this.applyDirection(tbPositions, diagram.direction, nodeSizes);
+    /**
+    TB/BT use centered rows; LR/RL use columns so the horizontal
+    gap stays rankSep instead of collapsing.
+    */
+    let positioned: Map<string, { x: number; y: number }>;
+    if (diagram.direction === "LR" || diagram.direction === "RL") {
+      const lrPos = this.assignLrPositions(rankGroups, sortedRanks, nodeSizes);
+      positioned = this.applyDirectionLr(lrPos, diagram.direction, nodeSizes);
+    } else {
+      const tbPositions = this.assignTbPositions(rankGroups, sortedRanks, nodeSizes);
+      positioned = this.applyDirection(tbPositions, diagram.direction, nodeSizes);
+    }
 
     const layoutNodes: LayoutNode[] = diagram.nodes
       .slice()
@@ -106,6 +129,8 @@ export class SimpleLayoutEngine implements LayoutEngine {
     }
 
     const nodePosMap = positioned;
+    // Parallel edges between the same pair spread apart instead of overlapping.
+    const parallelIndex = new Map<string, number>();
     const layoutEdges: LayoutEdge[] = edgesSorted.map((e) => {
       const srcPos = nodePosMap.get(e.source);
       const tgtPos = nodePosMap.get(e.target);
@@ -120,15 +145,19 @@ export class SimpleLayoutEngine implements LayoutEngine {
       }
       const srcSize = nodeSizes.get(e.source)!;
       const tgtSize = nodeSizes.get(e.target)!;
+      const key = `${e.source}\0${e.target}`;
+      const idx = parallelIndex.get(key) ?? 0;
+      parallelIndex.set(key, idx + 1);
       const points = this.computeEdgePoints(
         { x: srcPos.x, y: srcPos.y, w: srcSize.w, h: srcSize.h },
         { x: tgtPos.x, y: tgtPos.y, w: tgtSize.w, h: tgtSize.h },
         diagram.direction,
         srcPos,
         tgtPos,
+        idx,
       );
       let labelPos: { x: number; y: number } | undefined;
-      if (e.label) labelPos = this.computeLabelPos(points);
+      if (e.label) labelPos = this.computeLabelPos(points, idx);
       return { source: e.source, target: e.target, label: e.label, points, labelPos, data: e };
     });
 
@@ -143,6 +172,76 @@ export class SimpleLayoutEngine implements LayoutEngine {
         const bottom = g.y + g.height / 2;
         if (right + this.opts.margin > finalWidth) finalWidth = Math.ceil(right + this.opts.margin);
         if (bottom + this.opts.margin > finalHeight) finalHeight = Math.ceil(bottom + this.opts.margin);
+      }
+    }
+    /**
+    Grow the canvas for edge-label badges, then shift everything right/down
+    when a label would stick out past the left/top margin.
+    */
+    let minLabelLeft = Infinity;
+    let minLabelTop = Infinity;
+    for (const e of layoutEdges) {
+      if (!e.label || !e.labelPos) continue;
+      // Truncated length matches the renderer (48 chars), so bounds match visuals.
+      const visLen = Math.min(e.label.length, 48);
+      const estW = visLen * 6.5 + 8;
+      const estH = 16;
+      const right = e.labelPos.x + estW / 2;
+      const bottom = e.labelPos.y + estH / 2;
+      const left = e.labelPos.x - estW / 2;
+      const top = e.labelPos.y - estH / 2;
+      if (right + this.opts.margin > finalWidth) finalWidth = Math.ceil(right + this.opts.margin);
+      if (bottom + this.opts.margin > finalHeight) finalHeight = Math.ceil(bottom + this.opts.margin);
+      if (left < minLabelLeft) minLabelLeft = left;
+      if (top < minLabelTop) minLabelTop = top;
+    }
+    let shiftX = 0;
+    let shiftY = 0;
+    if (minLabelLeft !== Infinity && minLabelLeft < this.opts.margin) shiftX = Math.ceil(this.opts.margin - minLabelLeft);
+    if (minLabelTop !== Infinity && minLabelTop < this.opts.margin) shiftY = Math.ceil(this.opts.margin - minLabelTop);
+    if (shiftX !== 0 || shiftY !== 0) {
+      for (const [id, p] of positioned.entries()) {
+        p.x = round2(p.x + shiftX);
+        p.y = round2(p.y + shiftY);
+      }
+      for (const e of layoutEdges) {
+        for (const pt of e.points) {
+          pt.x = round2(pt.x + shiftX);
+          pt.y = round2(pt.y + shiftY);
+        }
+        if (e.labelPos) {
+          e.labelPos.x = round2(e.labelPos.x + shiftX);
+          e.labelPos.y = round2(e.labelPos.y + shiftY);
+        }
+      }
+      // Rebuild node and group positions from the shifted map.
+      for (const ln of layoutNodes) {
+        const p = positioned.get(ln.id)!;
+        ln.x = p.x;
+        ln.y = p.y;
+      }
+      const shiftedGroups = this.computeGroups(diagram.groups ?? [], positioned, nodeSizes);
+      layoutGroups.length = 0;
+      layoutGroups.push(...shiftedGroups);
+      // Groups moved with the shift, so re-expand for their new extents.
+      for (const lg of layoutGroups) {
+        const all = flattenGroups([lg]);
+        for (const g of all) {
+          const right = g.x + g.width / 2;
+          const bottom = g.y + g.height / 2;
+          if (right + this.opts.margin > finalWidth) finalWidth = Math.ceil(right + this.opts.margin);
+          if (bottom + this.opts.margin > finalHeight) finalHeight = Math.ceil(bottom + this.opts.margin);
+        }
+      }
+      finalWidth += shiftX;
+      finalHeight += shiftY;
+      // Labels moved too, so confirm the right edge once more.
+      for (const e of layoutEdges) {
+        if (!e.label || !e.labelPos) continue;
+        const visLen = Math.min(e.label.length, 48);
+        const estW = visLen * 6.5 + 8;
+        const right = e.labelPos.x + estW / 2;
+        if (right + this.opts.margin > finalWidth) finalWidth = Math.ceil(right + this.opts.margin);
       }
     }
 
@@ -240,6 +339,68 @@ export class SimpleLayoutEngine implements LayoutEngine {
     return ranks;
   }
 
+  private buildTopGroupMap(groups: import("../types.js").FloeGroup[]): Map<string, string> {
+    const map = new Map<string, string>();
+    const walk = (arr: import("../types.js").FloeGroup[], top?: string) => {
+      const sorted = [...arr].sort((a, b) => a.id.localeCompare(b.id));
+      for (const g of sorted) {
+        const curTop = top ?? g.id;
+        for (const nid of g.nodeIds ?? []) {
+          if (!map.has(nid)) map.set(nid, curTop);
+        }
+        if (g.groups && g.groups.length > 0) walk(g.groups, curTop);
+      }
+    };
+    walk(groups);
+    return map;
+  }
+
+  private applyBarycenter(
+    rankGroups: Map<number, string[]>,
+    sortedRanks: number[],
+    edges: FloeDiagram["edges"],
+    groupOf: Map<string, string>,
+  ): void {
+    // One barycenter pass over predecessor order; ties keep current order.
+    const preds = new Map<string, string[]>();
+    for (const e of edges) {
+      const arr = preds.get(e.target) ?? [];
+      arr.push(e.source);
+      preds.set(e.target, arr);
+    }
+    const orderIndex = new Map<string, number>();
+    for (const r of sortedRanks) {
+      const ids = rankGroups.get(r)!;
+      ids.forEach((id, i) => orderIndex.set(id, i));
+    }
+    for (const r of sortedRanks) {
+      const ids = rankGroups.get(r)!;
+      if (ids.length <= 1) continue;
+      const scored = ids.map((id, origIdx) => {
+        const ps = preds.get(id) ?? [];
+        if (ps.length === 0) return { id, score: -1, origIdx, group: groupOf.get(id) ?? "" };
+        let sum = 0;
+        let cnt = 0;
+        for (const p of ps) {
+          const oi = orderIndex.get(p);
+          if (oi !== undefined) { sum += oi; cnt++; }
+        }
+        const score = cnt > 0 ? sum / cnt : -1;
+        return { id, score, origIdx, group: groupOf.get(id) ?? "" };
+      });
+      scored.sort((a, b) => {
+        if (a.group !== b.group) return a.group.localeCompare(b.group);
+        if (a.score !== b.score) return a.score - b.score;
+        return a.origIdx - b.origIdx;
+      });
+      const reordered = scored.map((s) => s.id);
+      rankGroups.set(r, reordered);
+      reordered.forEach((id, i) => {
+        orderIndex.set(id, i);
+      });
+    }
+  }
+
   private assignTbPositions(
     rankGroups: Map<number, string[]>,
     sortedRanks: number[],
@@ -278,6 +439,72 @@ export class SimpleLayoutEngine implements LayoutEngine {
     return pos;
   }
 
+  private assignLrPositions(
+    rankGroups: Map<number, string[]>,
+    sortedRanks: number[],
+    nodeSizes: Map<string, { w: number; h: number }>,
+  ): Map<string, { x: number; y: number }> {
+    const pos = new Map<string, { x: number; y: number }>();
+    const { rankSep, nodeSep, margin } = this.opts;
+    // Column widths and heights per rank
+    const colWidths = new Map<number, number>();
+    const colHeights = new Map<number, number>();
+    let maxColHeight = 0;
+    for (const r of sortedRanks) {
+      const ids = rankGroups.get(r)!;
+      let maxW = 0;
+      let totalH = 0;
+      for (const id of ids) {
+        const sz = nodeSizes.get(id)!;
+        if (sz.w > maxW) maxW = sz.w;
+        totalH += sz.h;
+      }
+      totalH += Math.max(0, ids.length - 1) * nodeSep;
+      colWidths.set(r, maxW);
+      colHeights.set(r, totalH);
+      if (totalH > maxColHeight) maxColHeight = totalH;
+    }
+    let cursorX = margin;
+    for (const rank of sortedRanks) {
+      const ids = rankGroups.get(rank)!;
+      const colW = colWidths.get(rank)!;
+      const colH = colHeights.get(rank)!;
+      const startY = margin + (maxColHeight - colH) / 2;
+      let cursorY = startY;
+      for (const id of ids) {
+        const sz = nodeSizes.get(id)!;
+        // Center within column horizontally
+        const cx = cursorX + colW / 2;
+        const cy = cursorY + sz.h / 2;
+        pos.set(id, { x: round2(cx), y: round2(cy) });
+        cursorY += sz.h + nodeSep;
+      }
+      cursorX += colW + rankSep;
+    }
+    return pos;
+  }
+
+  private applyDirectionLr(
+    lrPos: Map<string, { x: number; y: number }>,
+    direction: Direction,
+    nodeSizes: Map<string, { w: number; h: number }>,
+  ): Map<string, { x: number; y: number }> {
+    if (direction === "LR") return lrPos;
+    // RL: mirror horizontally around content bounds
+    let maxX = -Infinity;
+    for (const [id, p] of lrPos.entries()) {
+      const sz = nodeSizes.get(id)!;
+      const right = p.x + sz.w / 2;
+      if (right > maxX) maxX = right;
+    }
+    const contentWidth = maxX + this.opts.margin;
+    const result = new Map<string, { x: number; y: number }>();
+    for (const [id, p] of lrPos.entries()) {
+      result.set(id, { x: round2(contentWidth - p.x), y: round2(p.y) });
+    }
+    return result;
+  }
+
   private applyDirection(
     tbPos: Map<string, { x: number; y: number }>,
     direction: Direction,
@@ -314,6 +541,7 @@ export class SimpleLayoutEngine implements LayoutEngine {
     direction: Direction,
     srcPos: { x: number; y: number },
     tgtPos: { x: number; y: number },
+    parallelIdx = 0,
   ): Array<{ x: number; y: number }> {
     let isBackward = false;
     if (direction === "TB") isBackward = srcPos.y > tgtPos.y;
@@ -359,15 +587,73 @@ export class SimpleLayoutEngine implements LayoutEngine {
       ];
     }
 
+    /**
+    Backward edges bend around the forward line instead of overlapping it.
+    Side and offset are deterministic; parallel edges bend further apart.
+    */
+    if (isBackward && !sameRank) {
+      const dx0 = tx - sx;
+      const dy0 = ty - sy;
+      const len0 = Math.hypot(dx0, dy0) || 1;
+      const nx0 = -dy0 / len0;
+      const ny0 = dx0 / len0;
+      const bend = 26 + Math.ceil(parallelIdx / 2) * 8;
+      const side = parallelIdx % 2 === 0 ? 1 : -1;
+      const mx = (sx + tx) / 2;
+      const my = (sy + ty) / 2;
+      const bx = round2(mx + nx0 * bend * side);
+      const by = round2(my + ny0 * bend * side);
+      let ftx = tx;
+      let fty = ty;
+      {
+        const dx = ftx - bx;
+        const dy = fty - by;
+        const len = Math.hypot(dx, dy);
+        if (len > 4) {
+          const gap = 2;
+          ftx = round2(ftx - (dx / len) * gap);
+          fty = round2(fty - (dy / len) * gap);
+        }
+      }
+      return [{ x: sx, y: sy }, { x: bx, y: by }, { x: ftx, y: fty }];
+    }
+
+    // Parallel edges spread perpendicular; the target pulls back 2px
+    // so the arrow marker stays visible outside the node border.
+    if (parallelIdx > 0) {
+      const dx = tx - sx;
+      const dy = ty - sy;
+      const len = Math.hypot(dx, dy) || 1;
+      const nx = -dy / len;
+      const ny = dx / len;
+      const off = (parallelIdx % 2 === 1 ? 1 : -1) * Math.ceil(parallelIdx / 2) * 7;
+      sx = round2(sx + nx * off);
+      sy = round2(sy + ny * off);
+      tx = round2(tx + nx * off);
+      ty = round2(ty + ny * off);
+    }
+    {
+      const dx = tx - sx;
+      const dy = ty - sy;
+      const len = Math.hypot(dx, dy);
+      if (len > 4) {
+        const gap = 2;
+        tx = round2(tx - (dx / len) * gap);
+        ty = round2(ty - (dy / len) * gap);
+      }
+    }
+
     return [{ x: sx, y: sy }, { x: tx, y: ty }];
   }
 
-  private computeLabelPos(points: Array<{ x: number; y: number }>): { x: number; y: number } {
+  private computeLabelPos(points: Array<{ x: number; y: number }>, parallelIdx = 0): { x: number; y: number } {
     if (points.length === 0) return { x: 0, y: 0 };
     if (points.length === 1) return { x: points[0]!.x, y: points[0]!.y };
     if (points.length === 2) {
       const a = points[0]!, b = points[1]!;
-      return { x: round2((a.x + b.x) / 2), y: round2((a.y + b.y) / 2 - 8) };
+      // Parallel edge labels stack vertically instead of overlapping.
+      const yOff = parallelIdx > 0 ? (parallelIdx % 2 === 1 ? 6 : -6) * Math.ceil(parallelIdx / 2) : 0;
+      return { x: round2((a.x + b.x) / 2), y: round2((a.y + b.y) / 2 - 8 + yOff) };
     }
     const mid = Math.floor(points.length / 2);
     const a = points[mid - 1]!, b = points[mid]!;
@@ -446,17 +732,32 @@ export class SimpleLayoutEngine implements LayoutEngine {
   }
 }
 
-function estimateNodeSize(label: string, type: string | undefined, opts: Required<LayoutOptions>): { w: number; h: number } {
-  const charW = 7;
+function estimateNodeSize(label: string, type: string | undefined, opts: Required<LayoutOptions>, fontSize = 12): { w: number; h: number } {
+  const fs = Number.isFinite(fontSize) && fontSize > 0 ? fontSize : 12;
+  const scale = fs / 12;
+  const charW = 7 * scale;
   const paddingX = 24;
   let minW = opts.minNodeWidth;
   let maxW = opts.maxNodeWidth;
-  let h = opts.nodeHeight;
-  if (type === "database") { minW = Math.max(minW, 90); h = 48; }
-  else if (type === "person") { minW = Math.max(minW, 80); h = 48; }
+  let h = opts.nodeHeight * (fs === 12 ? 1 : scale);
+  const t = (type ?? "").toLowerCase();
+  if (t === "database" || t === "db") { minW = Math.max(minW, 90); h = 48 * scale; }
+  else if (t === "person") { minW = Math.max(minW, 80); h = 48 * scale; }
+  else if (t === "decision" || t === "diamond" || t === "conditional" || t === "choice") {
+    minW = Math.max(minW, 96);
+    h = 56 * scale;
+  } else if (t === "document" || t === "doc") { minW = Math.max(minW, 88); h = 52 * scale; }
+  else if (t === "start" || t === "end" || t === "terminator") { minW = Math.max(minW, 84); h = 48 * scale; }
   const textW = label.length * charW + paddingX;
-  let w = Math.max(minW, Math.min(maxW, textW));
-  return { w: Math.round(w), h: Math.round(h) };
+  // Long labels wrap to at most 3 lines; short labels keep exact v1.0 size.
+  if (textW <= maxW) {
+    const w = Math.max(minW, Math.min(maxW, textW));
+    return { w: Math.round(w), h: Math.round(h) };
+  }
+  const lines = Math.min(3, Math.ceil(textW / maxW));
+  const w = Math.max(minW, maxW);
+  const wrappedH = h + (lines - 1) * 14 * scale;
+  return { w: Math.round(w), h: Math.round(wrappedH) };
 }
 
 function flattenGroups(groups: LayoutGroup[]): LayoutGroup[] {

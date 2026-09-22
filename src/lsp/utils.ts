@@ -1,10 +1,8 @@
 /**
- * LSP utilities — convert between Floe ranges (1-indexed line/column, offset) and LSP positions (0-indexed).
- * Reuses language services (no editor-specific semantics).
- */
-/**
- * Convert offset (0-indexed UTF-16) to LSP position (0-indexed line/char).
- * Must be deterministic and handle \r\n correctly.
+ * LSP utilities — convert between Floe ranges (1-indexed line/column, offset)
+ * and LSP positions (0-indexed). Reuses language services, no editor specifics.
+ *
+ * Offset conversion must be deterministic and handle \r\n correctly.
  */
 export function offsetToLspPosition(source, offset) {
     let line = 0;
@@ -80,7 +78,6 @@ export function lspPositionToOffset(source, pos) {
     return offset;
 }
 export function floeRangeToLspRange(source, floeRange) {
-    // Floe is 1-indexed, LSP 0-indexed; but we can compute via offset for accuracy
     const start = offsetToLspPosition(source, floeRange.start.offset);
     const end = offsetToLspPosition(source, floeRange.end.offset);
     return { start, end };
@@ -109,9 +106,8 @@ export function uriToPath(uri) {
     if (uri.startsWith("file://")) {
         try {
             const url = new URL(uri);
-            // On Windows, url.pathname is /C:/path; decode and handle
             let p = decodeURIComponent(url.pathname);
-            // Windows: remove leading slash before drive letter
+            // Windows URLs look like /C:/path — strip the leading slash.
             if (process.platform === "win32" && p.match(/^\/[A-Za-z]:/)) {
                 p = p.slice(1);
             }
@@ -124,10 +120,8 @@ export function uriToPath(uri) {
     return uri;
 }
 export function pathToUri(filePath) {
-    // Normalize to file://
     let p = filePath;
     if (process.platform === "win32") {
-        // Ensure forward slashes and leading slash
         p = p.replace(/\\/g, "/");
         if (!p.startsWith("/"))
             p = "/" + p;
@@ -136,6 +130,5 @@ export function pathToUri(filePath) {
         if (!p.startsWith("/"))
             p = "/" + p;
     }
-    // Encode spaces etc? Simple
     return "file://" + p;
 }

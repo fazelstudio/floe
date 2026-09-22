@@ -29,7 +29,13 @@ export function getHighlightTokens(source) {
                 break;
             case "ARROW":
             case "DASHDASH":
+            case "BIDIR":
+            case "EMPHASIS":
                 scope = "operator";
+                break;
+            case "COMMA":
+            case "DOT":
+                scope = "punctuation";
                 break;
             case "LBRACKET":
             case "RBRACKET":

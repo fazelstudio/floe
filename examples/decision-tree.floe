@@ -1,0 +1,13 @@
+// Decision tree — chaining + fan-out keep it to 7 lines
+direction TB
+meta title = "Signup Decision"
+Start [start] "Visit"
+Check [decision] "Signed up?"
+Dashboard [end]
+Pricing
+Trial
+
+Start -> Check
+Check -> Dashboard : yes
+Check -> Pricing, Trial : no
+Pricing -> Trial -> Dashboard

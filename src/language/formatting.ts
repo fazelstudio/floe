@@ -143,7 +143,7 @@ function formatStatement(code) {
     if (m) {
         return `direction ${m[1]}`;
     }
-    // If direction without value but with incomplete? e.g., "direction"
+    // Bare `direction` with no value formats as-is; validation reports E006.
     if (/^direction\s*$/.test(code)) {
         return "direction";
     }
@@ -162,7 +162,7 @@ function formatStatement(code) {
         out += " {";
         return out;
     }
-    // Group one-liner with closing brace on same line? "group X { }"
+    // Group one-liner `group X { }` stays on one line.
     m = code.match(/^group\s+([A-Za-z_][A-Za-z0-9_-]*)\s*(?:\[\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\])?\s*(?:"((?:[^"\\]|\\.)*)")?\s*\{\s*\}\s*$/);
     if (m) {
         const id = m[1];
@@ -174,17 +174,16 @@ function formatStatement(code) {
         if (label !== undefined)
             out += ` "${escapeString(unescapeString(label))}"`;
         out += " {";
-        // For one-liner we could keep as two lines? But deterministic we output header line plus closing? Simplify to header + " }" handled as two tokens? We'll output as "group X { }"
-        // For now normalize to "group X { }" but single line format? Better keep as "group X {"
-        // We'll format as "group X {" and expect closing brace separately. But input has both on same line, we normalize to "group X { }"
         return out + " }";
     }
-    // Meta: meta key = "value"
-    m = code.match(/^meta\s+([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*"((?:[^"\\]|\\.)*)"\s*$/);
+    // Meta: `meta key = "value"` or scoped `meta Target.key = "value"`.
+    m = code.match(/^meta\s+([A-Za-z_][A-Za-z0-9_-]*)(?:\.([A-Za-z_][A-Za-z0-9_-]*))?\s*=\s*"((?:[^"\\]|\\.)*)"\s*$/);
     if (m) {
         const key = m[1];
-        const val = m[2] ?? "";
-        return `meta ${key} = "${escapeString(unescapeString(val))}"`;
+        const sub = m[2];
+        const val = m[3] ?? "";
+        const full = sub ? `${key}.${sub}` : key;
+        return `meta ${full} = "${escapeString(unescapeString(val))}"`;
     }
     // Note: note [target] "text"
     m = code.match(/^note\s+(?:([A-Za-z_][A-Za-z0-9_-]*)\s+)?"((?:[^"\\]|\\.)*)"\s*$/);
@@ -202,39 +201,10 @@ function formatStatement(code) {
         const url = m[2] ?? "";
         return `link ${target} "${escapeString(unescapeString(url))}"`;
     }
-    // Edge: IDENT (->|--) IDENT (: label)?
-    // Use regex that captures source, op, target, labelPart (including quotes or raw)
-    // First try to match edge with label
-    m = code.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*(->|--)\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.+?)\s*$/);
-    if (m) {
-        const src = m[1];
-        const op = m[2];
-        const tgt = m[3];
-        const labelRaw = m[4].trim();
-        // If label is quoted string, normalize escaping
-        if (labelRaw.startsWith('"') && labelRaw.endsWith('"') && labelRaw.length >= 2) {
-            const inner = labelRaw.slice(1, -1);
-            // Unescape then re-escape? Keep as is but ensure quoted
-            return `${src} ${op} ${tgt} : "${escapeString(unescapeString(inner))}"`;
-        }
-        return `${src} ${op} ${tgt} : ${labelRaw}`;
-    }
-    // Edge without label
-    m = code.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*(->|--)\s*([A-Za-z_][A-Za-z0-9_-]*)\s*$/);
-    if (m) {
-        const src = m[1];
-        const op = m[2];
-        const tgt = m[3];
-        return `${src} ${op} ${tgt}`;
-    }
-    // Edge with colon but empty label? Keep as is but normalized spacing: "A -> B :"
-    m = code.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*(->|--)\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*$/);
-    if (m) {
-        const src = m[1];
-        const op = m[2];
-        const tgt = m[3];
-        return `${src} ${op} ${tgt} :`;
-    }
+    // Edge: SourceList (EdgeOp TargetList)+ (: label)?
+    // Operators: <->, ==>, ->, =>, --. Lists: A, B, C. Chains: A -> B -> C.
+    const formattedEdge = tryFormatEdge(code);
+    if (formattedEdge !== null) return formattedEdge;
     // Node: IDENT [type] "label"
     m = code.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*(?:\[\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\])?\s*(?:"((?:[^"\\]|\\.)*)")?\s*$/);
     if (m) {
@@ -248,18 +218,125 @@ function formatStatement(code) {
             out += ` "${escapeString(unescapeString(label))}"`;
         return out;
     }
-    // Fallback: normalize whitespace for unknown statement but keep trimmed
-    // For invalid lines like "User ->" or "A--B" etc, still try to canonicalize spaces around ->/--
-    // Use simple replacement: ensure spaces around -> and -- and colon and brackets
+    // Fallback: normalize spacing for invalid lines, keeping them readable.
     let fallback = code.trim();
-    // Normalize arrow spacing: replace any surrounding spaces around -> or -- to single spaces
-    fallback = fallback.replace(/\s*(->|--)\s*/g, " $1 ");
+    // Longest operator first so `--` never splits `->`.
+    fallback = fallback.replace(/\s*(<->|==>|->|=>|--)\s*/g, " $1 ");
+    fallback = fallback.replace(/\s*,\s*/g, ", ");
     fallback = fallback.replace(/\s*:\s*/g, " : ");
+    fallback = fallback.replace(/\s*\.\s*/g, ".");
     fallback = fallback.replace(/\s*\[\s*/g, " [");
     fallback = fallback.replace(/\s*\]\s*/g, "]");
     fallback = fallback.replace(/\s*=\s*/g, " = ");
     fallback = fallback.replace(/\s+/g, " ").trim();
     return fallback;
+}
+function tryFormatEdge(code: string): string | null {
+    const ID = "[A-Za-z_][A-Za-z0-9_-]*";
+    const LIST = `${ID}(?:\\s*,\\s*${ID})*`;
+    const OP = "(?:<->|==>|->|=>|--)";
+    const CHAIN = `${LIST}(?:\\s*${OP}\\s*${LIST})+`;
+    const PREFIX = `(?:(${ID})\\s*:\\s*)?`;
+    const withId = (id: string | undefined, chain: string, suffix: string) =>
+        `${id ? `${id}: ` : ""}${chain}${suffix}`;
+    // With label
+    let m = code.match(new RegExp(`^${PREFIX}(${CHAIN})\\s*:\\s*(.+?)\\s*$`));
+    if (m) {
+        const id = m[1];
+        const chainRaw = m[2] ?? "";
+        const labelRaw = (m[3] ?? "").trim();
+        const chain = normalizeEdgeChain(chainRaw);
+        if (!chain) return null;
+        // Explicit ids need a single edge, so multi-edge chains fall back untouched.
+        if (id && !isSingleEdge(chain)) return null;
+        if (labelRaw === "") return withId(id, chain, " :");
+        if (labelRaw.startsWith('"') && labelRaw.endsWith('"') && labelRaw.length >= 2) {
+            const inner = labelRaw.slice(1, -1);
+            return withId(id, chain, ` : "${escapeString(unescapeString(inner))}"`);
+        }
+        return withId(id, chain, ` : ${labelRaw}`);
+    }
+    // Without label
+    m = code.match(new RegExp(`^${PREFIX}(${CHAIN})\\s*$`));
+    if (m) {
+        const id = m[1];
+        const chain = normalizeEdgeChain(m[2] ?? "");
+        if (!chain) return null;
+        if (id && !isSingleEdge(chain)) return null;
+        return withId(id, chain, "");
+    }
+    // Empty label
+    m = code.match(new RegExp(`^${PREFIX}(${CHAIN})\\s*:\\s*$`));
+    if (m) {
+        const id = m[1];
+        const chain = normalizeEdgeChain(m[2] ?? "");
+        if (!chain) return null;
+        if (id && !isSingleEdge(chain)) return null;
+        return withId(id, chain, " :");
+    }
+    return null;
+}
+function isSingleEdge(chain: string): boolean {
+    const ops = chain.match(/<->|==>|->|=>|--/g) ?? [];
+    if (ops.length !== 1) return false;
+    if (chain.includes(",")) return false;
+    return true;
+}
+function normalizeEdgeChain(chainRaw: string): string | null {
+    // Split on operators while keeping them, then normalize each id list.
+    const re = /(<->|==>|->|=>|--)/g;
+    if (!re.test(chainRaw)) return null;
+    const tokens: Array<{ kind: "list" | "op"; text: string }> = [];
+    // Scan manually so `=>` never splits into `=` + `>`.
+    const opAt = (s: string, pos: number): string | null => {
+        if (s.startsWith("<->", pos)) return "<->";
+        if (s.startsWith("==>", pos)) return "==>";
+        if (s.startsWith("->", pos)) return "->";
+        if (s.startsWith("=>", pos)) return "=>";
+        if (s.startsWith("--", pos)) return "--";
+        return null;
+    };
+    let i = 0;
+    let buf = "";
+    while (i < chainRaw.length) {
+        const op = opAt(chainRaw, i);
+        if (op) {
+            tokens.push({ kind: "list", text: buf });
+            tokens.push({ kind: "op", text: op });
+            buf = "";
+            i += op.length;
+        } else {
+            buf += chainRaw[i];
+            i++;
+        }
+    }
+    tokens.push({ kind: "list", text: buf });
+    // Lists and operators must strictly alternate, starting and ending with a list.
+    if (tokens.length < 3 || tokens.length % 2 === 0) return null;
+    const normLists: string[] = [];
+    const normOps: string[] = [];
+    for (let k = 0; k < tokens.length; k++) {
+        const t = tokens[k]!;
+        if (k % 2 === 0) {
+            // list
+            const ids = t.text.split(",").map((s) => s.trim()).filter(Boolean);
+            if (ids.length === 0) return null;
+            for (const id of ids) {
+                if (!new RegExp(`^${"[A-Za-z_][A-Za-z0-9_-]*"}$`).test(id)) return null;
+            }
+            normLists.push(ids.join(", "));
+        } else {
+            if (t.kind !== "op") return null;
+            // Canonical operator for emphasis is `==>`.
+            const canonical = t.text === "=>" ? "==>" : t.text;
+            normOps.push(canonical);
+        }
+    }
+    let out = normLists[0] ?? "";
+    for (let k = 0; k < normOps.length; k++) {
+        out += ` ${normOps[k]} ${normLists[k + 1]}`;
+    }
+    return out;
 }
 function escapeString(s) {
     return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\t/g, "\\t");

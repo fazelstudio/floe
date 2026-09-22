@@ -1,0 +1,21 @@
+// Styled flow — named edges, scoped styles, edge notes/links (v1.2)
+direction LR
+meta title = "Styled Checkout"
+meta theme = "auto"
+meta legend = "true"
+
+Client [client] "Web App"
+Gateway [service] "Gateway"
+Worker
+Cache [store]
+
+Client -> Gateway -> Worker : order
+E1: Gateway -> Cache : warm
+
+note E1 "warms on deploy"
+link E1 "https://api.example.com/cache"
+
+meta Gateway.fill = "#dbeafe"
+meta Gateway.strokeWidth = "2"
+meta E1.stroke = "#2563eb"
+meta Cache.owner = "payments-team"

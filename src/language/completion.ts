@@ -22,14 +22,22 @@ const KNOWN_TYPES = [
     "service",
     "database",
     "client",
-    "subsystem",
-    "external",
-    "system",
-    "container",
-    "component",
+    "decision",
+    "start",
+    "end",
+    "process",
+    "document",
     "queue",
     "store",
     "gateway",
+    "system",
+    "external",
+    "subsystem",
+    "container",
+    "component",
+    "ellipse",
+    "circle",
+    "cloud",
 ];
 const TOP_LEVEL_KEYWORDS = ["direction", "group", "meta", "note", "link"];
 function prefixFilter(items, prefix) {
@@ -109,8 +117,7 @@ export function getCompletions(source, offset) {
                 return prefixFilter(items, valuePrefix);
             }
             else {
-                // hasValue true: user may be editing the existing direction value token (partial)
-                // Handle cursor inside or right after valueToken (at may be undefined when at token end)
+                // A value exists but the cursor may sit inside it while editing.
                 if (valueToken) {
                     const idx = tokens.indexOf(valueToken);
                     const prevIsDir = idx > 0 && tokens[idx - 1]?.type === "DIRECTION_KW";
@@ -124,9 +131,8 @@ export function getCompletions(source, offset) {
                         return prefixFilter(items, valuePrefix);
                     }
                 }
-                // Fallback for at being IDENT (when offset inside token)
+                // Cursor inside a partial direction value still completes it.
                 if (at && at.type === "IDENT") {
-                    // check previous token is DIRECTION_KW or this token is the value token
                     const isValueToken = valueToken && at.range.start.offset === valueToken.range.start.offset;
                     const prevIsDir = (() => {
                         const idx = tokens.indexOf(at);
@@ -138,7 +144,6 @@ export function getCompletions(source, offset) {
                             kind: "value",
                             detail: "direction",
                         }));
-                        // Use value token prefix, not keyword prefix
                         const valuePrefix = source.slice(at.range.start.offset, offset);
                         return prefixFilter(items, valuePrefix);
                     }
@@ -154,23 +159,32 @@ export function getCompletions(source, offset) {
                 }
             }
         }
-        // Also if currentLinePrefix trimmed is exactly "direction" or "direction " etc, or prefix is part of "direction" keyword? handle typo? but not needed
-        // Direct textual check: if trimmedBefore endsWith "direction" (keyword not yet completed + space)
-        if (trimmedBefore.endsWith("direction") && !trimmedBefore.endsWith("direction ")) {
-            // cursor right after keyword without space — also suggest directions after space? but we suggest directions
-            // Provide directions anyway
-            // Actually spec example: After "direction\n" suggest TB etc — means after keyword on next line? Wait example:
-            // After:
-            // direction
-            // suggest TB etc -> means line is "direction" with no value, next line maybe? Or same line start?
-            // Interpret as after typing "direction" and awaiting value
+    }
+    // 1b) After `meta Target.` suggest style + data keys.
+    {
+        const m = currentLinePrefix.match(/meta\s+[A-Za-z_][A-Za-z0-9_-]*\.\s*[A-Za-z0-9_-]*$/);
+        if (m) {
+            const keys = [
+                "fill",
+                "stroke",
+                "strokeWidth",
+                "fontSize",
+                "fontColor",
+                "opacity",
+                "owner",
+                "title",
+                "description",
+            ];
+            const items = keys.map((k) => ({
+                label: k,
+                kind: "property",
+                detail: ["fill", "stroke", "strokeWidth", "fontSize", "fontColor", "opacity"].includes(k) ? "style key" : "metadata key",
+            }));
+            return prefixFilter(items, prefix);
         }
     }
-    // 2) Inside brackets [ _ ] — suggest known node types
-    // Detect if previous non-whitespace char before offset is "[" or inside bracket context
+    // 2) Inside `[...]` suggest known node types.
     {
-        // Find last LBRACKET before offset not closed before offset
-        // Simple: look backward for LBRACKET, check if not followed by RBRACKET before offset
         let lastLbIdx = -1;
         let lastRbIdx = -1;
         for (let i = 0; i < tokens.length; i++) {
@@ -183,7 +197,6 @@ export function getCompletions(source, offset) {
                 lastRbIdx = i;
         }
         if (lastLbIdx !== -1 && lastLbIdx > lastRbIdx) {
-            // Inside brackets
             const items = KNOWN_TYPES.map((t) => ({
                 label: t,
                 kind: "type",
@@ -192,24 +205,21 @@ export function getCompletions(source, offset) {
             return prefixFilter(items, prefix);
         }
     }
-    // 3) After edge operator -> or -- => suggest node ids (existing nodes)
+    // 3) After an edge operator or comma suggest node ids.
     {
-        // Find last ARROW/DASHDASH before offset that is on same line and no target yet
         let lastOpIdx = -1;
         for (let i = tokens.length - 1; i >= 0; i--) {
             const t = tokens[i];
-            if (t.range.end.offset <= offset && (t.type === "ARROW" || t.type === "DASHDASH")) {
+            if (t.range.end.offset <= offset && (t.type === "ARROW" || t.type === "DASHDASH" || t.type === "BIDIR" || t.type === "EMPHASIS")) {
                 lastOpIdx = i;
                 break;
             }
             if (t.type === "NEWLINE" && t.range.start.offset < offset) {
-                // crossed line, but maybe edge is multiline? Floe is single line per statement, so break
                 break;
             }
         }
         if (lastOpIdx !== -1) {
             const opTok = tokens[lastOpIdx];
-            // Check if there is already a target IDENT after op before offset and before newline
             let hasTarget = false;
             for (let i = lastOpIdx + 1; i < tokens.length; i++) {
                 const t = tokens[i];
@@ -218,21 +228,17 @@ export function getCompletions(source, offset) {
                 if (t.type === "NEWLINE" || t.type === "COMMENT" || t.type === "RBRACE")
                     break;
                 if (t.type === "IDENT") {
-                    // Could be target but if prefix exists we still want to suggest? If at is IDENT (partial target) we should suggest filtered node ids
                     hasTarget = true;
-                    // But if we are currently typing target (at is IDENT), we should still suggest
                     if (at && at.type === "IDENT" && at.range.start.offset > opTok.range.end.offset) {
-                        hasTarget = false; // still completing target
+                        hasTarget = false;
                     }
                     break;
                 }
             }
             if (!hasTarget) {
-                // Suggest existing node ids + group ids
                 try {
                     const { diagram } = parseFloe(source);
                     const ids = diagram.nodes.map((n) => n.id);
-                    // also groups
                     const collectGroups = (gs) => {
                         const out = [];
                         for (const g of gs) {
@@ -249,7 +255,6 @@ export function getCompletions(source, offset) {
                         detail: "node",
                     }));
                     if (items.length === 0) {
-                        // Fallback suggest placeholder?
                         return [];
                     }
                     return prefixFilter(items, prefix);
@@ -259,34 +264,43 @@ export function getCompletions(source, offset) {
                 }
             }
         }
+        // After a comma inside an edge line (`A, B -> C`, `A -> B, C`) suggest ids.
+        if (before && before.type === "COMMA") {
+            try {
+                const { diagram } = parseFloe(source);
+                const ids = diagram.nodes.map((n) => n.id);
+                const collectGroups = (gs: any[]): string[] => {
+                    const out: string[] = [];
+                    for (const g of gs) {
+                        out.push(g.id);
+                        out.push(...collectGroups(g.groups));
+                    }
+                    return out;
+                };
+                const groupIds = collectGroups(diagram.groups);
+                const allIds = Array.from(new Set([...ids, ...groupIds]));
+                const items = allIds.map((id) => ({ label: id, kind: "variable", detail: "node" }));
+                if (items.length === 0) return [];
+                return prefixFilter(items, prefix);
+            } catch {
+                return [];
+            }
+        }
     }
-    // 4) At line start or after newline => suggest top-level keywords + existing ids for edge sources?
-    // Check if current line prefix after trimStart is empty or is partial keyword
+    // 4) At line start suggest top-level keywords, else existing node ids.
     {
         const lineTrim = trimmedLine;
-        // If line is empty or starts with partial identifier that could be keyword
         if (lineTrim === "" || /^[A-Za-z]*$/.test(prefix) && lineTrim.length <= prefix.length + 10) {
-            // Determine if we are at start of statement (beginning of line)
-            // Suggest keywords
             const keywordItems = TOP_LEVEL_KEYWORDS.map((k) => ({
                 label: k,
                 kind: "keyword",
                 detail: "keyword",
             }));
-            // Also suggest existing node ids as potential edge sources? Might be useful
-            // But to avoid random, we only suggest keywords at line start; user can type edge from existing node by typing its id
-            // For now, suggest keywords filtered by prefix, plus maybe direction values if after direction? already handled
-            // Include node types? No
-            // For broader completions, include existing ids as well when prefix matches?
-            // Let's include node ids when prefix is not empty and not a keyword prefix?
-            // Better: if prefix empty, suggest keywords; if prefix matches keyword start, filter keywords; else also suggest node ids
             const filteredKeywords = prefixFilter(keywordItems, prefix);
             if (filteredKeywords.length > 0) {
-                // Also consider suggesting node ids if requested? But keep deterministic
-                // Include node ids as secondary if keyword filter yields many? Keep just keywords for top-level start
                 return filteredKeywords;
             }
-            // If no keyword matches, fallback to suggest node ids (useful for edge source completion at line start)
+            // No keyword matches: complete an edge source from existing node ids.
             if (prefix.length > 0) {
                 try {
                     const { diagram } = parseFloe(source);
@@ -305,23 +319,21 @@ export function getCompletions(source, offset) {
             return filteredKeywords;
         }
     }
-    // 5) After "group" keyword — expecting group id? Could suggest?
+    // 5) After `group` a new id is expected: no suggestions.
     {
         if (before && before.type === "GROUP_KW") {
-            return []; // expecting new identifier, no suggestion
+            return [];
         }
         if (trimmedBefore.endsWith("group") || trimmedBefore.match(/\bgroup\s+$/)) {
             return [];
         }
     }
-    // 6) After "meta", "note", "link" etc — suggest identifiers
+    // 6) After `meta`, `note`, `link` suggest identifiers.
     {
         if (before && before.type === "META_KW") {
-            // meta key — suggest? no
             return [];
         }
         if (before && before.type === "NOTE_KW") {
-            // note [target] — suggest existing ids
             try {
                 const { diagram } = parseFloe(source);
                 const ids = Array.from(new Set([...diagram.nodes.map((n) => n.id), ...collectGroupIds(diagram.groups)]));
@@ -330,7 +342,6 @@ export function getCompletions(source, offset) {
                     kind: "variable",
                     detail: "note target",
                 }));
-                // Also suggest string? But not needed
                 if (items.length > 0)
                     return prefixFilter(items, prefix);
             }

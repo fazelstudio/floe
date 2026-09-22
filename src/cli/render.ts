@@ -7,6 +7,9 @@ export interface RenderOptions {
   output?: string;
   stdout?: boolean;
   json?: boolean;
+  theme?: "light" | "dark" | "auto";
+  background?: string;
+  font?: string;
 }
 
 export function runRender(files: string[], opts: RenderOptions = {}): number {
@@ -40,7 +43,13 @@ export function runRender(files: string[], opts: RenderOptions = {}): number {
       const parseResult = parseFloe(source);
       hasParseErrors = parseResult.diagnostics.some((d) => d.severity === "error");
       if (hasParseErrors) hadErrors = true;
-      const result = renderFloe(source);
+      const result = renderFloe(source, {
+        svgOptions: {
+          ...(opts.theme ? { theme: opts.theme } : {}),
+          ...(opts.background ? { background: opts.background } : {}),
+          ...(opts.font ? { fontFamily: opts.font } : {}),
+        },
+      });
       svg = result.svg;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

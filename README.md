@@ -6,7 +6,35 @@
 
 Lightweight, human-readable, AI-friendly diagram language. Files are `.floe`.
 
-> **v1.0 Stable** — language frozen, see `docs/00-language-freeze.md` and `SPEC.md` for source of truth. All v1.0 checklist items are complete.
+> **v1.2 Portable** — v1.0 frozen (`SPEC.md`), additive syntax in `docs/02-syntax.md`. Old files parse identically. Zero-dep core runs in Node, browsers, Bun, Deno. Goal: mudah dipahami, ringan, kompleks.
+
+## Quick syntax v1.2
+
+```floe
+direction LR
+meta title = "Checkout"
+meta theme = "auto"
+meta legend = "true"
+
+User [person] "End User"
+User -> Login -> Dashboard : success
+API -> Worker, Cache : fan-out
+Cache <-> API : sync
+Critical ==> Alert : hot path
+E1: Gateway -> Cache : warm
+meta Gateway.fill = "#dbeafe"
+note E1 "warms on deploy"
+
+group Backend "Services" {
+  API -> Worker : rpc
+}
+```
+
+Works everywhere (same ESM import — core has no `node:`/DOM deps):
+```ts
+import { parseFloe } from "@fazelstudio/floe";
+import { renderFloe } from "@fazelstudio/floe/pipeline";
+```
 
 ## Scope v1.0 — Stable
 
@@ -39,9 +67,12 @@ bun run typecheck
 # npm still works: npm install / npm run build / npm test
 ```
 
-## CLI (v1.0)
+## CLI (v1.1)
 
 ```bash
+# Scaffold
+floe init my-flow.floe
+
 # Validate
 floe check diagram.floe          # exit 0 OK, 1 errors, 2 usage
 floe check diagram.floe --json   # JSON for CI
@@ -51,9 +82,10 @@ floe format diagram.floe                 # print to stdout
 floe format diagram.floe --write         # overwrite in place
 floe format diagram.floe --check         # CI: exit 1 if not formatted
 
-# Render to SVG (deterministic, safe)
+# Render to SVG (deterministic, safe, responsive)
 floe render diagram.floe                 # SVG to stdout
-floe render diagram.floe -o out.svg      # write file
+floe render diagram.floe -o out.svg --theme dark
+floe render diagram.floe -o out.svg --background transparent --font "Inter"
 
 # LSP (stdio) for editors
 floe lsp --stdio

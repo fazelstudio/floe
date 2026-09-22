@@ -55,7 +55,8 @@ export class DagreLayoutEngine implements LayoutEngine {
     const nodeSizes = new Map<string, { w: number; h: number }>();
     for (const n of nodesSorted) {
       const label = n.label ?? n.id;
-      const size = estimateNodeSize(label, n.type, this.opts);
+      const fs = typeof (n as any).style?.fontSize === "number" ? (n as any).style.fontSize : 12;
+      const size = estimateNodeSize(label, n.type, this.opts, fs);
       nodeSizes.set(n.id, size);
       g.setNode(n.id, { width: size.w, height: size.h, label: n.id });
     }
@@ -163,14 +164,23 @@ function directionToRankdir(dir: import("../types.js").Direction): string {
   }
 }
 
-function estimateNodeSize(label: string, type: string | undefined, opts: Required<LayoutOptions>): { w: number; h: number } {
-  const charW = 7, paddingX = 24;
-  let minW = opts.minNodeWidth, maxW = opts.maxNodeWidth, h = opts.nodeHeight;
-  if (type === "database") { minW = Math.max(minW, 90); h = 48; }
-  else if (type === "person") { minW = Math.max(minW, 80); h = 48; }
+function estimateNodeSize(label: string, type: string | undefined, opts: Required<LayoutOptions>, fontSize = 12): { w: number; h: number } {
+  const fs = Number.isFinite(fontSize) && fontSize > 0 ? fontSize : 12;
+  const scale = fs / 12;
+  const charW = 7 * scale, paddingX = 24;
+  let minW = opts.minNodeWidth, maxW = opts.maxNodeWidth, h = opts.nodeHeight * (fs === 12 ? 1 : scale);
+  const t = (type ?? "").toLowerCase();
+  if (t === "database" || t === "db") { minW = Math.max(minW, 90); h = 48 * scale; }
+  else if (t === "person") { minW = Math.max(minW, 80); h = 48 * scale; }
+  else if (t === "decision" || t === "diamond" || t === "conditional") { minW = Math.max(minW, 96); h = 56 * scale; }
+  else if (t === "document" || t === "doc") { minW = Math.max(minW, 88); h = 52 * scale; }
   const textW = label.length * charW + paddingX;
-  let w = Math.max(minW, Math.min(maxW, textW));
-  return { w: Math.round(w), h: Math.round(h) };
+  if (textW <= maxW) {
+    const w = Math.max(minW, Math.min(maxW, textW));
+    return { w: Math.round(w), h: Math.round(h) };
+  }
+  const lines = Math.min(3, Math.ceil(textW / maxW));
+  return { w: Math.round(Math.max(minW, maxW)), h: Math.round(h + (lines - 1) * 14 * scale) };
 }
 
 function round2(n: number): number { return Math.round(n * 100) / 100; }

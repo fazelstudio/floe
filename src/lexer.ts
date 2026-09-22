@@ -9,6 +9,10 @@ export type TokenType =
   | "LINK_KW"
   | "ARROW"
   | "DASHDASH"
+  | "BIDIR"
+  | "EMPHASIS"
+  | "COMMA"
+  | "DOT"
   | "LBRACKET"
   | "RBRACKET"
   | "LBRACE"
@@ -126,6 +130,29 @@ export class Lexer {
         continue;
       }
 
+      if (ch === "<" && this.peek(1) === "-" && this.peek(2) === ">") {
+        this.advance(3);
+        const end = this.pos();
+        tokens.push(this.makeToken("BIDIR", "<->", start, end));
+        continue;
+      }
+      if (ch === "=" && this.peek(1) === "=" && this.peek(2) === ">") {
+        this.advance(3);
+        const end = this.pos();
+        tokens.push(this.makeToken("EMPHASIS", "==>", start, end));
+        continue;
+      }
+      if (ch === "=" && this.peek(1) === ">") {
+        this.advance(2);
+        const end = this.pos();
+        tokens.push(this.makeToken("EMPHASIS", "=>", start, end));
+        continue;
+      }
+      if (ch === ",") {
+        this.advance(1);
+        tokens.push(this.makeToken("COMMA", ",", start, this.pos()));
+        continue;
+      }
       if (ch === "-" && this.peek(1) === ">") {
         this.advance(2);
         const end = this.pos();
@@ -213,6 +240,11 @@ export class Lexer {
       if (ch === ":") {
         this.advance(1);
         tokens.push(this.makeToken("COLON", ":", start, this.pos()));
+        continue;
+      }
+      if (ch === ".") {
+        this.advance(1);
+        tokens.push(this.makeToken("DOT", ".", start, this.pos()));
         continue;
       }
       if (ch === "=") {

@@ -1,14 +1,15 @@
-# Floe — CLI (v1.0)
+# Floe — CLI
 
 **Bin:** `floe` → `dist/src/cli/main.js`  
-**Version:** `1.0.0`  
-**Commands:** `check`, `format`, `render`, `lsp`
+**Version:** `1.2.0`  
+**Commands:** `init`, `check`, `format`, `render`, `lsp`
 
 ## Usage
 ```bash
+floe init [diagram.floe]                           # scaffold starter (refuses overwrite)
 floe check diagram.floe [--json] [--quiet]       # exit 0 OK, 1 errors, 2 usage
 floe format diagram.floe [--write] [--check]     # stdout default
-floe render diagram.floe [-o output.svg]         # stdout default, best-effort SVG even if errors
+floe render diagram.floe [-o output.svg] [--theme light|dark|auto] [--background <color>] [--font <family>]
 floe lsp [--stdio]                               # Language Server over stdio
 floe --help / --version
 ```
@@ -27,15 +28,16 @@ Canonical deterministic formatting (see `07-formatting.md`).
 - `--write` and `--check` mutually exclusive → exit 2
 
 ## `render`
-Produces SVG via `renderFloe` (deterministic, escaped).
+Produces SVG via `renderFloe` (deterministic, escaped, responsive).
 - `floe render in.floe` → stdout
 - `floe render in.floe -o out.svg` → file (creates dirs)
+- `--theme light|dark|auto` overrides `meta theme`; `--background` and `--font` override canvas meta
 - `-o` with multiple files → exit 2
 - Exit: 1 if input had parse errors (but still writes best-effort SVG), 0 otherwise, 2 missing file
 
 ## `lsp`
 - `floe lsp --stdio` → JSON-RPC over stdio with capabilities:
-  `textDocumentSync: {openClose:true, change:1 (Full), save}`, `completionProvider {triggerChars: [" ","[","-",">",":"], resolveProvider:false}`, `hoverProvider:true`, `definitionProvider:true`, `referencesProvider:true`, `renameProvider:{prepareProvider:true}`, `documentFormattingProvider:true`, `documentSymbolProvider:true`, `foldingRangeProvider:true`, `diagnosticProvider`
+  `textDocumentSync: {openClose:true, change:1 (Full), save}`, `completionProvider {triggerChars: [" ","[","-",">",":","<","=",",","."], resolveProvider:false}`, `hoverProvider:true`, `definitionProvider:true`, `referencesProvider:true`, `renameProvider:{prepareProvider:true}`, `documentFormattingProvider:true`, `documentSymbolProvider:true`, `foldingRangeProvider:true`, `diagnosticProvider`
 - Reuses `src/language/*` — no duplicate parsers.
 
 ## Security
@@ -49,4 +51,4 @@ floe format *.floe --check || exit 1
 floe render diagram.floe -o diagram.svg
 ```
 
-See `src/cli/main.ts:1`, `tests/cli.test.ts:1`, and `docs/security.md`.
+See `src/cli/main.ts:1`, `tests/v02.test.ts`, and `docs/security.md`.

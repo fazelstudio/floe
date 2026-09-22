@@ -60,20 +60,13 @@ export class FloeLspServer {
         });
         this.input.on("end", () => {
             if (!this.shutdownRequested) {
-                // Client closed
                 process.exit(0);
             }
         });
-        // Handle errors
+        // Handle errors without crashing; the event loop stays alive via stdin.
         this.input.on("error", (err) => {
             console.error(`LSP input error: ${err.message}`);
         });
-        // Also handle SIGPIPE? Ensure we stay alive
-        // For testing, return immediately; for prod, keep alive
-        // We don't block here; event loop will keep running via stdin listener
-        if (this.input.isTTY) {
-            // No-op for test environments where input is not a stream
-        }
     }
     processBuffer() {
         while (true) {
@@ -257,7 +250,7 @@ export class FloeLspServer {
                     save: { includeText: false },
                 },
                 completionProvider: {
-                    triggerCharacters: [" ", "[", "-", ">", ":"],
+                    triggerCharacters: [" ", "[", "-", ">", ":", "<", "=", ",", "."],
                     resolveProvider: false,
                 },
                 hoverProvider: true,
@@ -298,15 +291,12 @@ export class FloeLspServer {
             return;
         const uri = doc.uri;
         const version = doc.version ?? 1;
-        // LSP spec: if changes have range, it's incremental; if no range, full
+        // A change with range is incremental, without range is a full replace.
         const hasRanges = changes.some((c) => c.range !== undefined);
         if (hasRanges) {
-            // Incremental changes: need to apply ranges sequentially based on evolving text
-            // For Full sync (change:1), changes will be single entry with full text and no range, but handle both
             this.docs.applyIncremental(uri, version, changes);
         }
         else {
-            // Full text sync
             const text = changes[0]?.text ?? "";
             this.docs.update(uri, version, text);
         }
@@ -317,7 +307,6 @@ export class FloeLspServer {
         if (!uri)
             return;
         this.docs.close(uri);
-        // Clear diagnostics for closed file
         this.sendNotification("textDocument/publishDiagnostics", { uri, diagnostics: [] });
     }
     publishDiagnostics(uri) {
@@ -325,7 +314,6 @@ export class FloeLspServer {
         if (!doc)
             return;
         const text = doc.text;
-        // Reuse language service diagnostics (editor-independent)
         let diagnostics = [];
         try {
             const floeDiags = getDiagnostics(text);
@@ -341,7 +329,6 @@ export class FloeLspServer {
             });
         }
         catch {
-            // Never crash on malformed input
             diagnostics = [];
         }
         this.sendNotification("textDocument/publishDiagnostics", {
@@ -360,7 +347,6 @@ export class FloeLspServer {
         const offset = lspPositionToOffset(doc.text, pos);
         try {
             const items = getCompletions(doc.text, offset);
-            // Map to LSP CompletionItem
             const lspItems = items.map((it) => ({
                 label: it.label,
                 kind: completionKindToLsp(it.kind),
@@ -418,7 +404,6 @@ export class FloeLspServer {
                 uri,
                 range: lspRange,
             };
-            // Alternatively return Location[] array
         }
         catch {
             return null;
@@ -435,7 +420,6 @@ export class FloeLspServer {
         const offset = lspPositionToOffset(doc.text, pos);
         try {
             const refs = getReferences(doc.text, offset);
-            // getReferences returns Location with range only; need to attach uri
             return refs.map((r) => ({
                 uri,
                 range: floeRangeToLspRange(doc.text, r.range),
@@ -455,14 +439,9 @@ export class FloeLspServer {
             return null;
         const offset = lspPositionToOffset(doc.text, pos);
         try {
-            // Use hover or definition to determine if at identifier
-            // We can try getReferences; if empty, not renameable
             const refs = getReferences(doc.text, offset);
             if (refs.length === 0)
                 return null;
-            // Also check that offset is on identifier via tokenization? For simplicity return range of first ref
-            // Find token range at offset
-            // Reuse getDefinition's logic: if definition exists, we have range
             const def = getDefinition(doc.text, offset);
             if (!def)
                 return null;
@@ -488,15 +467,8 @@ export class FloeLspServer {
         try {
             const result = rename(doc.text, offset, newName);
             if (result.error) {
-                // LSP rename error should be shown as response error or null?
-                // Return error viaJson RPC error? Instead return null and let client show? We'll send error
-                // But spec says rename returns WorkspaceEdit or null; invalid newName should be handled as error
-                // We'll return null and also send window/showMessage? For now return error as null and client will handle.
-                // Better to send error response via throw? But handler already catches.
-                // So we return null and log
                 return null;
             }
-            // result.edits is array of TextEdit with Floe Range
             const changes = {};
             changes[uri] = result.edits.map((e) => ({
                 range: floeRangeToLspRange(doc.text, e.range),
@@ -519,7 +491,6 @@ export class FloeLspServer {
             const formatted = format(doc.text);
             if (formatted === doc.text)
                 return [];
-            // Single edit covering whole document
             const start = { line: 0, character: 0 };
             const end = offsetToLspPosition(doc.text, doc.text.length);
             return [
@@ -588,26 +559,28 @@ export class FloeLspServer {
         }
     }
 }
+// Numbers are LSP CompletionItemKind values.
 function completionKindToLsp(kind) {
     switch (kind) {
-        case "keyword": return 14; // Keyword
-        case "type": return 8; // Interface or Type? Use 8 Interface
-        case "variable": return 6; // Variable
-        case "value": return 12; // Value
-        case "constant": return 21; // Constant
-        default: return 1; // Text
+        case "keyword": return 14;
+        case "type": return 8;
+        case "variable": return 6;
+        case "value": return 12;
+        case "constant": return 21;
+        default: return 1;
     }
 }
+// Numbers are LSP SymbolKind values.
 function symbolKindToLsp(kind) {
     switch (kind) {
-        case "node": return 5; // Class? Use 5 Class for node, or 13 Variable? Choose 5
-        case "group": return 4; // Class? Use 4 for group container? Actually 2 Module, 4 Class
-        case "edge": return 13; // Variable? Use 13 Variable for edge
-        case "direction": return 14; // Constant? Use 14 Constant
-        case "meta": return 13; // Variable
+        case "node": return 5;
+        case "group": return 4;
+        case "edge": return 13;
+        case "direction": return 14;
+        case "meta": return 13;
         case "annotation": return 13;
         case "link": return 13;
-        default: return 1; // File
+        default: return 1;
     }
 }
 export async function startLspServer(opts = {}) {

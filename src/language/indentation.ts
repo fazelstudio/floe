@@ -5,8 +5,7 @@ import { tokenize } from "../lexer.js";
  */
 export const DEFAULT_INDENT = "  ";
 export function getIndentForLine(source, lineNumber, indentStr = DEFAULT_INDENT) {
-    // Compute indent for given lineNumber (1-indexed) based on balance of braces before that line.
-    // Closing brace lines should be dedented.
+    // Indent follows brace balance on previous lines; closing braces dedent.
     const lines = source.split(/\r?\n/);
     let indentLevel = 0;
     for (let i = 1; i < lineNumber; i++) {
@@ -16,8 +15,7 @@ export function getIndentForLine(source, lineNumber, indentStr = DEFAULT_INDENT)
             continue;
         // Strip comments
         const code = stripComment(trimmed);
-        // Count opening and closing braces on line
-        // For simplicity, if line is group header with {, increment after
+        // Count braces; a group header ending in `{` indents the next line.
         if (/^\s*group\b.*\{\s*$/.test(code) || code.includes("{")) {
             // Count { and }
             const opens = (code.match(/\{/g) || []).length;
@@ -30,19 +28,12 @@ export function getIndentForLine(source, lineNumber, indentStr = DEFAULT_INDENT)
             indentLevel = Math.max(0, indentLevel - 1);
         }
         else {
-            // Also handle lines that contain } not at start?
+            // Net brace change carries to the next line, floored at zero.
             const opens = (code.match(/\{/g) || []).length;
             const closes = (code.match(/\}/g) || []).length;
-            if (closes > opens) {
-                // dedent before next line handled via closes? But we already adjust for } lines separately.
-                // For generic, adjust indentLevel by net
-                indentLevel += opens - closes;
-                if (indentLevel < 0)
-                    indentLevel = 0;
-            }
-            else {
-                indentLevel += opens - closes;
-            }
+            indentLevel += opens - closes;
+            if (indentLevel < 0)
+                indentLevel = 0;
         }
     }
     // If current line is closing brace, dedent

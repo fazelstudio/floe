@@ -1,0 +1,2 @@
+User <-> API : sync
+API <-> Cache : invalidate

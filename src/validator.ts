@@ -9,10 +9,18 @@ import { isValidIdentifier } from "./types.js";
  * - duplicate node declarations (E003)
  * - duplicate direction declarations (E004)
  * - malformed / invalid constructs (E005, E008, etc.)
+ * - duplicate edge ids + id collisions (E015, v1.2)
+ * - invalid style values (E013, v1.2)
  *
  * Keeps validation separate from parsing so the core model can be reused
  * without parser errors leaking into semantics.
  */
+function isSafeColor(v) {
+    if (typeof v !== "string") return false;
+    const s = v.trim();
+    if (/^#[0-9a-fA-F]{3,8}$/.test(s)) return true;
+    return /^[a-zA-Z][a-zA-Z0-9-]*$/.test(s) && s.length <= 24;
+}
 export function validate(input) {
     const { diagram, explicitNodes, edges } = input;
     const out = [...input.diagnostics];
@@ -55,8 +63,14 @@ export function validate(input) {
             }
         }
     }
-    // Edges sources/targets
+    // Edges sources/targets, including explicit edge ids.
     for (const e of edges) {
+        if (e.id !== undefined && e.id !== "" && !isValidIdentifier(e.id)) {
+            const already = out.some((d) => d.code === "E002" && d.message.includes(String(e.id)));
+            if (!already) {
+                out.push(diag("error", "E002", `Invalid edge id '${e.id}': must match [A-Za-z_][A-Za-z0-9_-]*`, e.idRange ?? e.range));
+            }
+        }
         if (!isValidIdentifier(e.source)) {
             const already = out.some((d) => d.range.start.offset === e.sourceRange.start.offset &&
                 d.code === "E002");
@@ -78,21 +92,14 @@ export function validate(input) {
     for (const n of explicitNodes) {
         const prev = seen.get(n.id);
         if (prev) {
-            // Duplicate declaration
-            // Check if types differ? Regardless, it's duplicate explicit declaration
             out.push(diag("error", "E003", `Duplicate node declaration for '${n.id}'`, n.range));
-            // Also optionally warn if types differ
-            if (prev.type !== n.type) {
-                // Keep as same error, not separate warning
-            }
         }
         else {
             seen.set(n.id, n);
         }
     }
     // ---- 4. Malformed / invalid constructs ----
-    // E.g., check for edges where source === target? Not forbidden in v0.1, allow self-loop, so no error.
-    // Check for empty labels already done in parser (E010), but validate again:
+    // Empty labels are reported by the parser (E010); re-check for programmatically built diagrams.
     for (const e of edges) {
         if (e.label !== undefined && e.label.trim().length === 0) {
             const range = e.labelRange ?? e.range;
@@ -100,8 +107,7 @@ export function validate(input) {
             if (!already)
                 out.push(diag("error", "E010", `Empty edge label`, range));
         }
-        // Invalid node types already handled via invalid identifier above; also handle empty type case would have been E008
-        // We keep E008 check for explicit nodes where type is empty? Parser already emitted.
+        // Invalid node types already handled via invalid identifier above; E008 comes from the parser.
     }
     // ---- 5. Groups validation ----
     // Flatten groups for analysis
@@ -124,7 +130,6 @@ export function validate(input) {
         if (g.type !== undefined && !isValidIdentifier(g.type)) {
             out.push(diag("error", "E002", `Invalid group type '${g.type}': must match [A-Za-z_][A-Za-z0-9_-]*`, g.range));
         }
-        // Empty label check? Group label can be empty string? If label is empty after trim, flag E014? But allow.
     }
     // 5b. Duplicate group ids (E011)
     const seenGroups = new Map();
@@ -137,14 +142,31 @@ export function validate(input) {
             seenGroups.set(g.id, g);
         }
     }
-    // 5c. Invalid annotation/link targets (E014)
+    // 5c. Invalid annotation/link targets (E014), including edge ids.
     const nodeIds = new Set();
     for (const n of explicitNodes)
         nodeIds.add(n.id);
     for (const n of diagram.nodes)
         nodeIds.add(n.id);
     const groupIds = new Set(allGroups.map((g) => g.id));
-    const allIds = new Set([...nodeIds, ...groupIds]);
+    const edgeIds = new Set(edges.map((e) => e.id).filter(Boolean));
+    const allIds = new Set([...nodeIds, ...groupIds, ...edgeIds]);
+    // 5c-i. Duplicate edge ids (E015): explicit dupes + collisions with node/group ids.
+    // Auto ids are generated collision-free, so only explicit (idRange present) can collide.
+    const seenEdgeIds = new Map();
+    for (const e of edges) {
+        if (!e.idRange) continue; // auto id — parser guaranteed unique
+        const prev = seenEdgeIds.get(e.id);
+        if (prev) {
+            out.push(diag("error", "E015", `Duplicate edge id '${e.id}'`, e.idRange));
+        }
+        else {
+            seenEdgeIds.set(e.id, e);
+            if (nodeIds.has(e.id) || groupIds.has(e.id)) {
+                out.push(diag("error", "E015", `Edge id '${e.id}' collides with a node or group id`, e.idRange));
+            }
+        }
+    }
     if (input.annotations) {
         for (const ann of input.annotations) {
             if (ann.target !== undefined && !allIds.has(ann.target)) {
@@ -221,9 +243,54 @@ export function validate(input) {
             out.push(diag("error", "E013", `Empty metadata value for key '${k}'`, diagram.directionRange ?? { start: { line: 1, column: 1, offset: 0 }, end: { line: 1, column: 1, offset: 0 } }));
         }
     }
-    // 5e. Edge kind validation: already ensured parser only produces valid kinds, but check label empty already done
+    // 5d-ii. Per-element style + metadata values from scoped `meta ID.key`.
+    function checkStyle(style, range, owner) {
+        if (!style) return;
+        for (const [k, v] of Object.entries(style)) {
+            if (k === "fill" || k === "stroke" || k === "fontColor") {
+                if (typeof v !== "string" || !isSafeColor(v)) {
+                    out.push(diag("error", "E013", `Invalid style value for '${owner}.${k}': expected a color (#hex or name)`, range));
+                }
+            }
+            else if (k === "strokeWidth" || k === "fontSize") {
+                if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) {
+                    out.push(diag("error", "E013", `Invalid style value for '${owner}.${k}': must be a number > 0`, range));
+                }
+            }
+            else if (k === "opacity") {
+                if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 1) {
+                    out.push(diag("error", "E013", `Invalid style value for '${owner}.${k}': opacity must be 0..1`, range));
+                }
+            }
+        }
+    }
+    function checkElemMeta(meta, range, owner) {
+        if (!meta) return;
+        for (const [k, v] of Object.entries(meta)) {
+            if (!isValidIdentifier(k)) {
+                out.push(diag("error", "E002", `Invalid metadata key '${k}' for '${owner}'`, range));
+            }
+            if (typeof v !== "string" || v.trim().length === 0) {
+                const already = out.some((d) => d.code === "E013" && d.range.start.offset === range.start.offset && d.message.includes(`'${owner}.${k}'`));
+                if (!already)
+                    out.push(diag("error", "E013", `Empty metadata value for '${owner}.${k}'`, range));
+            }
+        }
+    }
+    for (const n of diagram.nodes) {
+        checkStyle(n.style, n.range, n.id);
+        checkElemMeta(n.metadata, n.range, n.id);
+    }
     for (const e of edges) {
-        if (e.kind !== "directed" && e.kind !== "undirected") {
+        checkStyle(e.style, e.range, e.id || `${e.source}->${e.target}`);
+        checkElemMeta(e.metadata, e.range, e.id || `${e.source}->${e.target}`);
+    }
+    for (const g of allGroups) {
+        checkStyle(g.style, g.range, g.id);
+    }
+    // 5e. Edge kind validation: four kinds, anything else is malformed.
+    for (const e of edges) {
+        if (e.kind !== "directed" && e.kind !== "undirected" && e.kind !== "bidirectional" && e.kind !== "emphasis") {
             out.push(diag("error", "E005", `Invalid edge kind '${e.kind}' for edge ${e.source} -> ${e.target}`, e.range));
         }
     }

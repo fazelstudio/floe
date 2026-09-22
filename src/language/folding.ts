@@ -29,8 +29,7 @@ export function getFoldingRanges(source) {
             }
         }
     }
-    // Also detect unclosed groups (still provide folding from open to end of file)
-    // For diagnostics we already handle, but for folding we could include open until EOF
+    // Unclosed groups still fold, from the opening brace to end of file.
     if (stack.length > 0) {
         const lines = source.split(/\r?\n/);
         const endLine = lines.length;
@@ -51,7 +50,7 @@ export function getFoldingRanges(source) {
     ranges.sort((a, b) => a.startLine - b.startLine || a.endLine - b.endLine);
     return ranges;
 }
-/** For CodeMirror folding service — alias */
+/** Folding info alias, same shape as getFoldingRanges. */
 export function getFoldingInfo(source) {
     return getFoldingRanges(source);
 }

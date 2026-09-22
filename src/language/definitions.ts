@@ -37,8 +37,12 @@ export function getDefinition(source, offset) {
     if (grp) {
         return { range: grp.range };
     }
-    // If not found as node/group but appears as edge source/target implicit, definition could be first occurrence?
-    // Fallback: find first token with same lexeme
+    // Explicit edge ids (`E1: A -> B`) resolve to their `ID:` prefix.
+    const edge = diagram.edges.find((e) => e.id === id && e.idRange);
+    if (edge) {
+        return { range: edge.idRange };
+    }
+    // Otherwise fall back to the first identical token in the file.
     for (const t of tokens) {
         if (t.type === "IDENT" && t.lexeme === id) {
             return { range: t.range };
@@ -55,6 +59,9 @@ export function getDefinitionForWord(source, word) {
     const grp = findGroup(diagram.groups, word);
     if (grp)
         return { range: grp.range };
+    const edge = diagram.edges.find((e) => e.id === word && e.idRange);
+    if (edge)
+        return { range: edge.idRange };
     return null;
 }
 function findGroup(groups, id) {

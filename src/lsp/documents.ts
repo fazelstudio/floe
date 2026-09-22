@@ -26,21 +26,14 @@ export class DocumentManager {
             this.docs.set(uri, { uri, languageId: "floe", version, text });
             return;
         }
-        // LSP incremental changes: apply in order
-        // Each change has range (LSP) and text. If no range, it's full replace.
-        // We need to convert LSP range to offsets using current doc text progressively?
-        // Simplify: implement full-replace only if no range; otherwise incremental.
-        // Need helper to convert LSP range to offset for current text.
-        // We'll import utils dynamically to avoid circular? Instead implement inline.
+        // LSP sends incremental edits in order; a change without range is a full replace.
+        // Ranges refer to the text as it stands before each change is applied.
         let newText = doc.text;
         for (const change of changes) {
             if (!change.range) {
                 newText = change.text;
             }
             else {
-                // Convert LSP range to offsets based on newText before this change
-                // We need to compute offsets from Lsp positions; to do that we need to track.
-                // Use helper function similar to lspPositionToOffset but inline here.
                 const startOffset = lspPosToOffset(newText, change.range.start);
                 const endOffset = lspPosToOffset(newText, change.range.end);
                 newText = newText.slice(0, startOffset) + change.text + newText.slice(endOffset);

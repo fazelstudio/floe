@@ -1,23 +1,33 @@
 import { Lexer } from "./lexer.js";
 import { diag } from "./diagnostics.js";
-import { DEFAULT_DIRECTION, DIRECTIONS } from "./types.js";
+import { DEFAULT_DIRECTION, DIRECTIONS, isStyleKey } from "./types.js";
 /**
  * Floe grammar-based parser
  *
- * Grammar (EBNF):
+ * Grammar (EBNF) — v1.2 additive (backward compatible, portable):
  *   Program       ::= (Statement | NEWLINE | COMMENT)* EOF
  *   Statement     ::= DirectionStmt | NodeStmt | EdgeStmt | GroupStmt | MetadataStmt | AnnotationStmt | LinkStmt
  *   DirectionStmt ::= "direction" Direction
  *   Direction     ::= "TB" | "BT" | "LR" | "RL"
  *   NodeStmt      ::= IDENT ("[" IDENT "]")? (STRING)?
- *   EdgeStmt      ::= IDENT EdgeOp IDENT (":" Label)?
- *   EdgeOp        ::= "->" | "--"
+ *   EdgeStmt      ::= (IDENT ":")? SourceList (EdgeOp TargetList)+ (":" Label)?
+ *   SourceList    ::= IDENT ("," IDENT)*
+ *   TargetList    ::= IDENT ("," IDENT)*
+ *   EdgeOp        ::= "->" | "--" | "<->" | "==>" | "=>"
  *   Label         ::= <trimmed raw slice after ":">  (non-empty) OR STRING decoded
  *   GroupStmt     ::= "group" IDENT ("[" IDENT "]")? (STRING)? "{" GroupBody "}"
  *   GroupBody     ::= (Statement | NEWLINE | COMMENT)*
- *   MetadataStmt  ::= "meta" IDENT "=" STRING
+ *   MetadataStmt  ::= "meta" IDENT ("." IDENT)? "=" STRING
  *   AnnotationStmt::= "note" (IDENT)? STRING
  *   LinkStmt      ::= "link" IDENT STRING
+ *
+ * v1.1 examples: `A -> B -> C` (chain), `A -> B, C` (fan-out),
+ * `A, B -> C` (fan-in), `A <-> B` (bidirectional), `A ==> B : hot` (emphasis).
+ * Label after ":" applies to last segment (shared if single segment).
+ * v1.2: `E1: A -> B : ok` (explicit stable edge id, single edge only),
+ * `meta API.fill = "#dbeafe"` (per-element style), `meta API.owner = "team"` (custom data).
+ * `note E1 "..."` / `link E1 "..."` may target edges by id.
+ * Endpoints stay bare IDENTs — declare `[type] "label"` on separate lines.
  *
  * Features:
  * - source ranges for all nodes/edges/groups
@@ -45,6 +55,8 @@ export class Parser {
     annotations = [];
     links = [];
     linkMap = new Map();
+    // Pending scoped metadata (`meta Target.key`); resolved post-parse.
+    scopedMetas = [];
     constructor(source) {
         this.source = source;
         this.tokens = new Lexer(source).tokenize();
@@ -61,17 +73,12 @@ export class Parser {
                 end: pos,
             }));
         }
-        // Handle unclosed groups (missing })
+        // Unclosed groups report E012 and are treated as closed at EOF.
         for (const grp of this.groupStack) {
             this.diagnostics.push(diag("error", "E012", `Unclosed group '${grp.id}': missing closing '}'`, grp.range));
-            // Treat as closed at EOF
         }
-        // Include remaining unclosed groups as if closed (they are already in hierarchy)
-        // groupStack should be cleared
-        // Note: groups[] already contains them via hierarchy, but top-level groups already inserted
-        // No extra needed; just clear stack
         this.groupStack = [];
-        // Build full node list: explicit + implicit from edges
+        // Full node list: explicit declarations first, then implicit edge endpoints.
         const nodeMap = new Map();
         for (const n of this.explicitNodes) {
             if (!nodeMap.has(n.id))
@@ -92,6 +99,78 @@ export class Parser {
             }
         }
         const nodes = Array.from(nodeMap.values());
+        // Auto edge ids fill the gaps: explicit ids are kept, `eN` skips taken ids.
+        const groupIndex = new Map();
+        const indexGroups = (arr) => {
+            for (const g of arr) {
+                if (!groupIndex.has(g.id)) groupIndex.set(g.id, g);
+                if (g.groups && g.groups.length > 0) indexGroups(g.groups);
+            }
+        };
+        indexGroups(this.groups);
+        const takenIds = new Set([...nodeMap.keys(), ...groupIndex.keys()]);
+        for (const e of this.edges) {
+            if (e.id) takenIds.add(e.id);
+        }
+        let autoN = 1;
+        for (const e of this.edges) {
+            if (!e.id) {
+                while (takenIds.has(`e${autoN}`)) autoN++;
+                e.id = `e${autoN}`;
+                takenIds.add(e.id);
+                autoN++;
+            }
+        }
+        const edgeIndex = new Map();
+        for (const e of this.edges) {
+            if (!edgeIndex.has(e.id)) edgeIndex.set(e.id, e);
+        }
+        // Scoped metadata (`meta Target.key`) resolves here so forward references work.
+        for (const sm of this.scopedMetas) {
+            const targetNode = nodeMap.get(sm.target);
+            const targetGroup = !targetNode ? groupIndex.get(sm.target) : undefined;
+            const targetEdge = !targetNode && !targetGroup ? edgeIndex.get(sm.target) : undefined;
+            const el = targetNode ?? targetGroup ?? targetEdge;
+            if (!el) {
+                this.diagnostics.push(diag("error", "E014", `Scoped metadata target '${sm.target}' does not exist`, sm.range));
+                continue;
+            }
+            if (isStyleKey(sm.key)) {
+                if (!el.style) el.style = {};
+                if (sm.key === "strokeWidth" || sm.key === "fontSize" || sm.key === "opacity") {
+                    const num = Number(sm.value.trim());
+                    if (!Number.isFinite(num)) {
+                        this.diagnostics.push(diag("error", "E013", `Invalid numeric style value for '${sm.target}.${sm.key}': expected a number, got '${sm.value}'`, sm.range));
+                        continue;
+                    }
+                    if ((sm.key === "strokeWidth" || sm.key === "fontSize") && num <= 0) {
+                        this.diagnostics.push(diag("error", "E013", `Invalid style value for '${sm.target}.${sm.key}': must be > 0`, sm.range));
+                        continue;
+                    }
+                    if (sm.key === "opacity" && (num < 0 || num > 1)) {
+                        this.diagnostics.push(diag("error", "E013", `Invalid style value for '${sm.target}.${sm.key}': opacity must be 0..1`, sm.range));
+                        continue;
+                    }
+                    el.style[sm.key] = num;
+                }
+                else {
+                    el.style[sm.key] = sm.value;
+                }
+            }
+            else {
+                if (el.metadata) el.metadata[sm.key] = sm.value;
+                else el.metadata = { [sm.key]: sm.value };
+            }
+        }
+        // Links also resolve here to cover forward references.
+        for (const l of this.links) {
+            const n = nodeMap.get(l.target);
+            if (n && !n.link) n.link = l.url;
+            const g = groupIndex.get(l.target);
+            if (g && !g.link) g.link = l.url;
+            const e = edgeIndex.get(l.target);
+            if (e && !e.link) e.link = l.url;
+        }
         const diagram = {
             direction: this.direction,
             directionRange: this.directionRange,
@@ -162,7 +241,7 @@ export class Parser {
                 return;
             }
             if (this.check("RBRACE")) {
-                // Do not consume RBRACE here; let loop handle group close
+                // Leave RBRACE for the main loop, which closes the group.
                 return;
             }
             if (this.check("COMMENT")) {
@@ -181,7 +260,7 @@ export class Parser {
             if (this.match("COMMENT")) {
                 continue;
             }
-            // Handle closing brace for groups
+            // Group closing brace.
             if (this.check("RBRACE")) {
                 const tok = this.advance();
                 const grp = this.groupStack.pop();
@@ -189,15 +268,14 @@ export class Parser {
                     this.diagnostics.push(diag("error", "E005", `Unexpected '}' without matching 'group'`, tok.range));
                 }
                 else {
-                    // Update group's range to include closing brace
                     grp.range = { start: grp.range.start, end: tok.range.end };
                 }
                 continue;
             }
             if (this.check("UNKNOWN")) {
                 const bad = this.advance();
-                // Distinguish unterminated string: lexeme starts with "
                 if (bad.lexeme.startsWith('"')) {
+                    // Unterminated string: the lexer keeps the raw text.
                     this.diagnostics.push(diag("error", "E006", `Unterminated string: missing closing '"'`, bad.range));
                 }
                 else {
@@ -238,8 +316,17 @@ export class Parser {
                     this.parseNodeStmt();
                     continue;
                 }
-                if (look.type === "ARROW" || look.type === "DASHDASH") {
+                if (look.type === "ARROW" || look.type === "DASHDASH" || look.type === "BIDIR" || look.type === "EMPHASIS") {
                     this.parseEdgeStmt();
+                    continue;
+                }
+                // Fan-in edge (`A, B -> C`) starts the same as a node; scan for an operator.
+                if (look.type === "COMMA") {
+                    if (this.lineHasEdgeOp()) {
+                        this.parseEdgeStmt();
+                        continue;
+                    }
+                    this.parseNodeStmt();
                     continue;
                 }
                 if (look.type === "LBRACKET") {
@@ -247,9 +334,6 @@ export class Parser {
                     continue;
                 }
                 if (look.type === "STRING") {
-                    // Could be node with label: IDENT STRING
-                    // Peek ahead after STRING to see if next is ARROW/DASHDASH? e.g., API "label" -> B ? That's unlikely but treat as node for now
-                    // If after IDENT STRING there is ARROW, then this IDENT would be edge source; but we already checked next is STRING not ARROW, so it's node.
                     this.parseNodeStmt();
                     continue;
                 }
@@ -261,9 +345,14 @@ export class Parser {
                     continue;
                 }
                 if (look.type === "COLON") {
+                    // Named edge (`E1: A -> B`) vs malformed `User : label`.
+                    if (this.isNamedEdge()) {
+                        this.parseEdgeStmt();
+                        continue;
+                    }
                     const idTok = this.advance();
                     const colon = this.advance();
-                    this.diagnostics.push(diag("error", "E005", `Malformed statement: expected '->' or '--' between identifiers before ':'`, { start: idTok.range.start, end: colon.range.end }));
+                    this.diagnostics.push(diag("error", "E005", `Malformed statement: expected '->', '--', '<->' or '==>' between identifiers before ':'`, { start: idTok.range.start, end: colon.range.end }));
                     this.synchronize();
                     continue;
                 }
@@ -326,20 +415,20 @@ export class Parser {
         const kw = this.advance(); // GROUP_KW
         let start = kw.range.start;
         let end = kw.range.end;
-        // Expect group id IDENT
         if (this.check("IDENT")) {
             const idTok = this.advance();
             const id = idTok.lexeme;
             let type;
+            let typeRange;
             let label;
             let labelRange;
             let headerEnd = idTok.range.end;
-            // Optional type [IDENT]
             if (this.check("LBRACKET")) {
                 const lb = this.advance();
                 if (this.check("IDENT")) {
                     const typeTok = this.advance();
                     type = typeTok.lexeme;
+                    typeRange = typeTok.range;
                     if (this.check("RBRACKET")) {
                         const rb = this.advance();
                         headerEnd = rb.range.end;
@@ -399,7 +488,7 @@ export class Parser {
                     }
                 }
             }
-            // Optional label STRING
+            // Optional label.
             if (this.check("STRING")) {
                 const labelTok = this.advance();
                 label = labelTok.lexeme;
@@ -410,7 +499,6 @@ export class Parser {
             else {
                 end = headerEnd;
             }
-            // Expect LBRACE
             let hasBrace = false;
             let braceRange;
             if (this.check("LBRACE")) {
@@ -421,22 +509,14 @@ export class Parser {
             }
             else {
                 this.diagnostics.push(diag("error", "E006", `Missing opening '{' for group '${id}'`, { start: start, end: headerEnd }));
-                // Alternative E012 also
-                // Do not push to stack? Should still create group but treat as if brace missing, so we still push but warn
-                // For recovery, if missing brace, we won't push to stack to avoid swallowing rest of file into group.
-                // But spec allows groups without brace as error; we will still create group but not push
-                if (!this.check("NEWLINE") && !this.check("COMMENT") && !this.check("EOF") && !this.check("RBRACE")) {
-                    // If next token is not newline, maybe we should synchronize?
-                    // For now just push diagnostic and synchronize
-                    // Don't create group with missing brace as container
-                }
-                // create group without brace - not pushed to stack, just top-level placeholder? Better still push but require closing?
-                // Decide: if brace missing, create group but not push; errors will be reported later as unclosed.
-                // Let's create group and NOT push to avoid swallowing file
+                // Without a brace the group cannot contain a body, so record it
+                // without pushing: the rest of the file stays outside the group.
                 const grp = {
                     id,
                     label,
                     type,
+                    typeRange,
+                    labelRange,
                     range: { start, end: headerEnd },
                     nodeIds: [],
                     groups: [],
@@ -444,13 +524,13 @@ export class Parser {
                     annotations: [],
                     parentId: this.currentGroup()?.id,
                 };
-                // Validate id already? Duplicate check in validator
+                // Duplicate ids are rejected by the validator.
                 const parent = this.currentGroup();
                 if (parent)
                     parent.groups.push(grp);
                 else
                     this.groups.push(grp);
-                // Check extra after header without brace
+                // Reject trailing tokens after a braceless header.
                 if (!this.check("NEWLINE") && !this.check("COMMENT") && !this.check("EOF") && !this.check("RBRACE")) {
                     const extra = this.peek();
                     this.diagnostics.push(diag("error", this.codeForUnexpected(extra), `Unexpected token '${extra.lexeme}' after group header`, extra.range));
@@ -463,6 +543,8 @@ export class Parser {
                 id,
                 label,
                 type,
+                typeRange,
+                labelRange,
                 range: { start, end },
                 nodeIds: [],
                 groups: [],
@@ -470,29 +552,22 @@ export class Parser {
                 annotations: [],
                 parentId: this.currentGroup()?.id,
             };
-            // Add to parent or top-level
+            // Add to parent or top-level, then push so the body parses inside it.
             const parent = this.currentGroup();
             if (parent)
                 parent.groups.push(grp);
             else
                 this.groups.push(grp);
-            // Push onto stack
             this.groupStack.push(grp);
-            // Check for extra tokens before newline after brace (should be none except comment)
+            // A body may start on the same line (`group X { API }`), so only
+            // reject tokens that cannot start a statement.
             if (!this.check("NEWLINE") && !this.check("COMMENT") && !this.check("EOF") && !this.check("RBRACE")) {
                 const extra = this.peek();
-                // If next token is not at line end but could be start of body on same line? Our spec requires newline after {
-                // But allow body on same line? For simplicity, allow statements after brace without newline? Better require newline but we can just allow and continue
-                // If extra is IDENT etc that could be body, we should not error if brace is followed immediately by content without newline (unlikely but possible: "group X { API }")
-                // To support same-line body, we should not error if extra can start a statement inside group.
-                // So we allow if extra is IDENT/GROUP_KW/META_KW/NOTE_KW/LINK_KW/DIRECTION_KW etc., don't flag.
-                // Only flag if extra is unexpected like UNKNOWN
                 const starterTypes = ["IDENT", "GROUP_KW", "META_KW", "NOTE_KW", "LINK_KW", "DIRECTION_KW", "RBRACE"];
                 if (!starterTypes.includes(extra.type)) {
                     this.diagnostics.push(diag("error", this.codeForUnexpected(extra), `Unexpected token '${extra.lexeme}' after '{'`, extra.range));
                     this.synchronize();
                 }
-                // else allow body to be parsed next loop iteration (even without newline)
             }
             return;
         }
@@ -504,11 +579,8 @@ export class Parser {
             return;
         }
         else if (this.check("LBRACE")) {
-            // Missing id, but has brace: `group {`
             this.diagnostics.push(diag("error", "E006", `Missing group identifier after 'group'`, kw.range));
-            // Consume brace and create placeholder? But for recovery, just consume brace and continue without creating group
-            this.advance(); // consume {
-            // Create anonymous group? skip
+            this.advance(); // consume { so recovery continues after it
             this.diagnostics.push(diag("error", "E005", `Group without identifier ignored`, kw.range));
             return;
         }
@@ -527,7 +599,6 @@ export class Parser {
         const kw = this.advance(); // META_KW
         let start = kw.range.start;
         let end = kw.range.end;
-        // Expect IDENT key
         if (!this.check("IDENT")) {
             if (this.check("UNKNOWN")) {
                 const bad = this.advance();
@@ -542,6 +613,29 @@ export class Parser {
         const keyTok = this.advance();
         const key = keyTok.lexeme;
         end = keyTok.range.end;
+        // Scoped form: `meta Target.key = "value"`.
+        let scopeTarget = null;
+        let scopeKey = null;
+        let scopeKeyRange = null;
+        if (this.check("DOT")) {
+            this.advance(); // consume .
+            if (!this.check("IDENT")) {
+                if (this.check("UNKNOWN")) {
+                    const bad = this.advance();
+                    this.diagnostics.push(diag("error", "E002", `Invalid identifier '${bad.lexeme}' for scoped metadata key`, bad.range));
+                    this.synchronize();
+                    return;
+                }
+                this.diagnostics.push(diag("error", "E006", `Missing key after '.' in scoped metadata 'meta ${key}.'`, keyTok.range));
+                this.synchronize();
+                return;
+            }
+            const subTok = this.advance();
+            scopeTarget = key;
+            scopeKey = subTok.lexeme;
+            scopeKeyRange = subTok.range;
+            end = subTok.range.end;
+        }
         // Expect EQUALS
         if (!this.check("EQUALS")) {
             this.diagnostics.push(diag("error", "E006", `Missing '=' after metadata key '${key}'`, { start: kw.range.start, end: keyTok.range.end }));
@@ -557,7 +651,6 @@ export class Parser {
                 return;
             }
             const tok = this.advance();
-            // If UNKNOWN that is unterminated string, already flagged as UNKNOWN starting with "
             if (tok.lexeme.startsWith('"')) {
                 this.diagnostics.push(diag("error", "E006", `Unterminated string for metadata key '${key}'`, tok.range));
             }
@@ -570,26 +663,22 @@ export class Parser {
         const valTok = this.advance();
         const value = valTok.lexeme;
         end = valTok.range.end;
-        // Check extra tokens
         if (!this.check("NEWLINE") && !this.check("COMMENT") && !this.check("EOF") && !this.check("RBRACE")) {
             const extra = this.peek();
             this.diagnostics.push(diag("error", this.codeForUnexpected(extra), `Unexpected token '${extra.lexeme}' after metadata value`, extra.range));
             this.synchronize();
         }
         const metaRange = { start, end };
+        if (scopeTarget !== null) {
+            // Targets may be declared later, so scoped entries resolve post-parse.
+            this.scopedMetas.push({ target: scopeTarget, key: scopeKey, value, range: metaRange, keyRange: scopeKeyRange });
+            return;
+        }
         const cur = this.currentGroup();
         if (cur) {
-            // check duplicate within group
-            if (cur.metadata.hasOwnProperty(key)) {
-                // validator will flag? But we emit warning here as E013?
-                // For now allow override, but could diag
-            }
             cur.metadata[key] = value;
         }
         else {
-            if (this.metadata.hasOwnProperty(key)) {
-                // duplicate key at diagram level - validator will handle? But emit E013?
-            }
             this.metadata[key] = value;
             this.metadataRanges.set(key, metaRange);
         }
@@ -601,7 +690,6 @@ export class Parser {
         let target;
         let text;
         let textRange;
-        // Two forms: note STRING  or note IDENT STRING
         if (this.check("STRING")) {
             const t = this.advance();
             text = t.lexeme;
@@ -619,7 +707,6 @@ export class Parser {
                 end = t.range.end;
             }
             else {
-                // Missing text
                 if (this.check("NEWLINE") || this.check("COMMENT") || this.check("EOF") || this.check("RBRACE")) {
                     this.diagnostics.push(diag("error", "E006", `Missing annotation text after target '${target}': expected quoted string`, idTok.range));
                     return;
@@ -636,7 +723,6 @@ export class Parser {
             }
         }
         else {
-            // No IDENT nor STRING
             if (this.check("NEWLINE") || this.check("COMMENT") || this.check("EOF") || this.check("RBRACE")) {
                 this.diagnostics.push(diag("error", "E006", `Incomplete note statement: expected quoted string or target identifier`, kw.range));
                 return;
@@ -658,12 +744,10 @@ export class Parser {
             this.synchronize();
             return;
         }
-        // Validate text non-empty? Empty string "" would be allowed? Spec says annotation text should be non-empty; we treat empty as E014
+        // Empty annotation text is stored but flagged.
         if (text !== undefined && text.trim().length === 0) {
             this.diagnostics.push(diag("error", "E014", `Empty annotation text`, textRange));
-            // Still store? Allow but flagged
         }
-        // Check extra tokens
         if (!this.check("NEWLINE") && !this.check("COMMENT") && !this.check("EOF") && !this.check("RBRACE")) {
             const extra = this.peek();
             this.diagnostics.push(diag("error", this.codeForUnexpected(extra), `Unexpected token '${extra.lexeme}' after annotation`, extra.range));
@@ -680,7 +764,6 @@ export class Parser {
         const kw = this.advance(); // LINK_KW
         let start = kw.range.start;
         let end = kw.range.end;
-        // Expect IDENT target
         if (!this.check("IDENT")) {
             if (this.check("UNKNOWN")) {
                 const bad = this.advance();
@@ -695,7 +778,6 @@ export class Parser {
         const targetTok = this.advance();
         const target = targetTok.lexeme;
         end = targetTok.range.end;
-        // Expect STRING url
         if (!this.check("STRING")) {
             if (this.check("NEWLINE") || this.check("COMMENT") || this.check("EOF") || this.check("RBRACE")) {
                 this.diagnostics.push(diag("error", "E006", `Missing URL for link target '${target}': expected quoted string`, targetTok.range));
@@ -724,22 +806,18 @@ export class Parser {
         }
         const range = { start, end };
         const link = { target, url, range };
-        // Check duplicate
         if (this.linkMap.has(target)) {
-            // Duplicate link for same target - validator will handle or we diag
             this.diagnostics.push(diag("error", "E014", `Duplicate link for target '${target}'`, range));
         }
         else {
             this.linkMap.set(target, link);
             this.links.push(link);
-            // If target is a group id, also set group.link
             const grp = this.findGroupById(target);
             if (grp)
                 grp.link = url;
         }
     }
     findGroupById(id) {
-        // search recursively in groups
         const search = (arr) => {
             for (const g of arr) {
                 if (g.id === id)
@@ -757,6 +835,7 @@ export class Parser {
         let start = idTok.range.start;
         let end = idTok.range.end;
         let type;
+        let typeRange;
         let label;
         let labelRange;
         if (this.check("LBRACKET")) {
@@ -764,6 +843,7 @@ export class Parser {
             if (this.check("IDENT")) {
                 const typeTok = this.advance();
                 type = typeTok.lexeme;
+                typeRange = typeTok.range;
                 if (this.check("RBRACKET")) {
                     const rb = this.advance();
                     end = rb.range.end;
@@ -814,11 +894,8 @@ export class Parser {
                 }
             }
             else if (this.check("NEWLINE") || this.check("COMMENT") || this.check("EOF") || this.check("RBRACE") || this.check("STRING")) {
-                // STRING could be label after missing bracket close? e.g., Node [ "label"
-                // But treat as missing bracket before label
                 this.diagnostics.push(diag("error", "E006", `Incomplete node declaration: expected type identifier and ']' after '['`, lb.range));
                 end = lb.range.end;
-                // Do not consume string yet; fall through to label handling
             }
             else {
                 const tok = this.advance();
@@ -830,106 +907,179 @@ export class Parser {
                 else {
                     this.synchronize();
                     const nodeRange = { start, end };
-                    this.pushNode({ id: idTok.lexeme, type, label, range: nodeRange });
+                    this.pushNode({ id: idTok.lexeme, type, typeRange, label, labelRange, range: nodeRange });
                     return;
                 }
             }
         }
-        // Optional display label STRING
+        // Optional display label.
         if (this.check("STRING")) {
             const labelTok = this.advance();
             label = labelTok.lexeme;
             labelRange = labelTok.range;
             end = labelTok.range.end;
-            // Validate label non-empty already: empty string "" would be lexeme "" (empty after trimming?), we could flag E010-like
             if (label.trim().length === 0) {
                 this.diagnostics.push(diag("error", "E010", `Empty display label for node '${idTok.lexeme}'`, labelTok.range));
             }
         }
-        // After node (and optional label), check for extra tokens before line end
         if (!this.check("NEWLINE") && !this.check("COMMENT") && !this.check("EOF") && !this.check("RBRACE")) {
             const extra = this.peek();
             this.diagnostics.push(diag("error", this.codeForUnexpected(extra), `Unexpected token '${extra.lexeme}' after node declaration`, extra.range));
             this.synchronize();
         }
         const nodeRange = { start, end };
-        this.pushNode({ id: idTok.lexeme, type, label, range: nodeRange });
+        this.pushNode({ id: idTok.lexeme, type, typeRange, label, labelRange, range: nodeRange });
     }
     pushNode(node) {
         this.explicitNodes.push(node);
         const cur = this.currentGroup();
         if (cur) {
-            cur.nodeIds.push(node.id);
+            if (!cur.nodeIds.includes(node.id)) cur.nodeIds.push(node.id);
         }
     }
-    parseEdgeStmt() {
-        const sourceTok = this.advance(); // IDENT
-        // Expect ARROW or DASHDASH
-        let kind = "directed";
-        let opTok = null;
-        if (this.check("ARROW")) {
-            opTok = this.advance();
-            kind = "directed";
+    lineHasEdgeOp() {
+        // True when an edge operator appears before the line ends or a label starts.
+        for (let i = this.idx; i < this.tokens.length; i++) {
+            const t = this.tokens[i];
+            if (!t) break;
+            if (t.type === "ARROW" || t.type === "DASHDASH" || t.type === "BIDIR" || t.type === "EMPHASIS") return true;
+            if (t.type === "COLON" || t.type === "NEWLINE" || t.type === "COMMENT" || t.type === "RBRACE" || t.type === "EOF") return false;
         }
-        else if (this.check("DASHDASH")) {
-            opTok = this.advance();
-            kind = "undirected";
+        return false;
+    }
+    isNamedEdge() {
+        // `E1: A -> B` has an edge operator after the `ID : sources` prefix;
+        // malformed `User : label` has none.
+        let i = this.idx;
+        const toks = this.tokens;
+        if (!toks[i] || toks[i].type !== "IDENT") return false;
+        if (!toks[i + 1] || toks[i + 1].type !== "COLON") return false;
+        i += 2;
+        if (!toks[i] || toks[i].type !== "IDENT") return false;
+        i++;
+        while (toks[i] && toks[i].type === "COMMA") {
+            i++;
+            if (!toks[i] || toks[i].type !== "IDENT") return false;
+            i++;
         }
-        else {
-            this.diagnostics.push(diag("error", "E005", `Missing '->' or '--' after source identifier '${sourceTok.lexeme}'`, sourceTok.range));
-            this.synchronize();
-            return;
-        }
-        // Expect target IDENT
-        if (this.check("NEWLINE") || this.check("COMMENT") || this.check("EOF") || this.check("RBRACE")) {
-            this.diagnostics.push(diag("error", "E009", `Missing edge target after '${opTok.lexeme}'`, opTok.range));
-            this.diagnostics.push(diag("error", "E006", `Incomplete edge: expected target identifier after '${opTok.lexeme}'`, { start: sourceTok.range.start, end: opTok.range.end }));
-            return;
-        }
-        if (this.check("UNKNOWN")) {
-            const bad = this.advance();
-            const isDigitStart = /^[0-9]/.test(bad.lexeme);
-            this.diagnostics.push(diag("error", isDigitStart ? "E002" : "E007", isDigitStart
-                ? `Invalid identifier '${bad.lexeme}' for edge target: must start with a letter or underscore`
-                : `Invalid character '${bad.lexeme}' for edge target`, bad.range));
-            this.synchronize();
-            return;
-        }
+        if (!toks[i]) return false;
+        return toks[i].type === "ARROW" || toks[i].type === "DASHDASH" || toks[i].type === "BIDIR" || toks[i].type === "EMPHASIS";
+    }
+    parseIdentList(role) {
+        // Parses `IDENT (, IDENT)*`. Returns null after reporting and synchronizing.
+        const list = [];
         if (!this.check("IDENT")) {
             const tok = this.advance();
-            this.diagnostics.push(diag("error", "E005", `Unexpected token '${tok.lexeme}' after '${opTok.lexeme}'; expected target identifier`, tok.range));
+            this.diagnostics.push(diag("error", "E005", `Unexpected token '${tok.lexeme}' where ${role} identifier expected`, tok.range));
             this.synchronize();
-            return;
+            return null;
         }
-        const targetTok = this.advance(); // IDENT
-        let edgeEnd = targetTok.range.end;
+        list.push(this.advance());
+        while (this.check("COMMA")) {
+            this.advance(); // consume comma
+            if (this.check("IDENT")) {
+                list.push(this.advance());
+                continue;
+            }
+            if (this.check("UNKNOWN")) {
+                const bad = this.advance();
+                const isDigitStart = /^[0-9]/.test(bad.lexeme);
+                this.diagnostics.push(diag("error", isDigitStart ? "E002" : "E007", isDigitStart
+                    ? `Invalid identifier '${bad.lexeme}' for edge ${role}: must start with a letter or underscore`
+                    : `Invalid character '${bad.lexeme}' for edge ${role}`, bad.range));
+                this.synchronize();
+                return null;
+            }
+            // Trailing comma with no identifier after it.
+            const commaTok = this.previous();
+            this.diagnostics.push(diag("error", "E009", `Missing edge ${role} after ','`, commaTok.range));
+            this.diagnostics.push(diag("error", "E006", `Incomplete edge: expected identifier after ','`, commaTok.range));
+            return null;
+        }
+        return list;
+    }
+    parseEdgeOp() {
+        if (this.check("ARROW")) return { kind: "directed", opTok: this.advance() };
+        if (this.check("DASHDASH")) return { kind: "undirected", opTok: this.advance() };
+        if (this.check("BIDIR")) return { kind: "bidirectional", opTok: this.advance() };
+        if (this.check("EMPHASIS")) return { kind: "emphasis", opTok: this.advance() };
+        return null;
+    }
+    parseEdgeStmt() {
+        // SourceList (EdgeOp TargetList)+ (":" Label)? with optional `ID:` prefix.
+        // Covers fan-in, fan-out, chaining, and all operators.
+        let explicitId = null;
+        let explicitIdRange = null;
+        if (this.check("IDENT") && this.tokens[this.idx + 1] && this.tokens[this.idx + 1].type === "COLON" && this.isNamedEdge()) {
+            const idTok = this.advance();
+            this.advance(); // consume COLON
+            explicitId = idTok.lexeme;
+            explicitIdRange = idTok.range;
+        }
+        const sources = this.parseIdentList("source");
+        if (!sources) return;
+        const segments: Array<{ kind: any; opTok: any; targets: any[] }> = [];
+        while (true) {
+            const op = this.parseEdgeOp();
+            if (!op) {
+                if (segments.length === 0) {
+                    const lastSrc = sources[sources.length - 1];
+                    this.diagnostics.push(diag("error", "E005", `Missing '->', '--', '<->' or '==>' after source identifier '${lastSrc.lexeme}'`, lastSrc.range));
+                    this.synchronize();
+                    return;
+                }
+                break;
+            }
+            // Expect target list after op
+            if (this.check("NEWLINE") || this.check("COMMENT") || this.check("EOF") || this.check("RBRACE")) {
+                this.diagnostics.push(diag("error", "E009", `Missing edge target after '${op.opTok.lexeme}'`, op.opTok.range));
+                const firstSrc = sources[0];
+                this.diagnostics.push(diag("error", "E006", `Incomplete edge: expected target identifier after '${op.opTok.lexeme}'`, { start: firstSrc.range.start, end: op.opTok.range.end }));
+                return;
+            }
+            if (this.check("UNKNOWN")) {
+                const bad = this.advance();
+                const isDigitStart = /^[0-9]/.test(bad.lexeme);
+                this.diagnostics.push(diag("error", isDigitStart ? "E002" : "E007", isDigitStart
+                    ? `Invalid identifier '${bad.lexeme}' for edge target: must start with a letter or underscore`
+                    : `Invalid character '${bad.lexeme}' for edge target`, bad.range));
+                this.synchronize();
+                return;
+            }
+            if (!this.check("IDENT")) {
+                const tok = this.advance();
+                this.diagnostics.push(diag("error", "E005", `Unexpected token '${tok.lexeme}' after '${op.opTok.lexeme}'; expected target identifier`, tok.range));
+                this.synchronize();
+                return;
+            }
+            const targets = this.parseIdentList("target");
+            if (!targets) return;
+            segments.push({ kind: op.kind, opTok: op.opTok, targets });
+        }
         let label;
         let labelRange;
+        let labelEndPos: any = null;
+        let colonPresent = false;
         if (this.check("COLON")) {
             const colon = this.advance();
+            colonPresent = true;
+            labelEndPos = colon.range.end;
             if (this.check("NEWLINE") || this.check("COMMENT") || this.check("EOF") || this.check("RBRACE")) {
                 this.diagnostics.push(diag("error", "E010", `Empty edge label after ':'`, colon.range));
-                edgeEnd = colon.range.end;
             }
             else {
-                // If next token is STRING, treat that as label (decoded) and consume single STRING
                 if (this.check("STRING")) {
                     const lblTok = this.advance();
                     label = lblTok.lexeme;
                     labelRange = lblTok.range;
-                    edgeEnd = lblTok.range.end;
+                    labelEndPos = lblTok.range.end;
                     if (label.trim().length === 0) {
                         this.diagnostics.push(diag("error", "E010", `Empty edge label after ':'`, colon.range));
                         label = undefined;
                         labelRange = undefined;
                     }
-                    // Check extra after string? Edge label after colon currently expects single string or raw; if after STRING there are more tokens before newline, that's extra? But original spec allowed any chars after colon until newline as label, so if we used STRING, we shouldn't allow extra.
+                    // A quoted label ends the statement; anything after it is unexpected.
                     if (!this.check("NEWLINE") && !this.check("COMMENT") && !this.check("EOF") && !this.check("RBRACE")) {
-                        // If there are extra tokens after STRING label, treat them as unexpected? But original raw slice would have captured them as part of label.
-                        // For consistency, we will capture remaining tokens as part of label raw if not just STRING? But if we consumed STRING as label, we should allow trailing? For now, treat extra as error.
-                        // However, to preserve original behavior where label after colon includes everything, we could instead reconstruct raw if there are extra tokens.
-                        // Decide: if after STRING there are more tokens, combine: label is STRING plus raw remainder?
-                        // Simpler: if extra tokens exist, push error and synchronize
                         const extra = this.peek();
                         this.diagnostics.push(diag("error", this.codeForUnexpected(extra), `Unexpected token '${extra.lexeme}' after edge label`, extra.range));
                         this.synchronize();
@@ -953,11 +1103,9 @@ export class Parser {
                     }
                     if (labelTokens.length === 0) {
                         this.diagnostics.push(diag("error", "E010", `Empty edge label after ':'`, colon.range));
-                        edgeEnd = colon.range.end;
                     }
                     else {
-                        // Handle single STRING token case already above, but if raw includes quotes? Already handled.
-                        // Reconstruct raw slice
+                        // Unquoted labels keep the raw text after the colon.
                         const endOffset = lastTok.range.end.offset;
                         const rawSlice = this.source.slice(firstOffset, endOffset);
                         const trimmed = rawSlice.trim();
@@ -965,17 +1113,12 @@ export class Parser {
                             this.diagnostics.push(diag("error", "E010", `Empty edge label after ':'`, colon.range));
                         }
                         else {
-                            // If trimmed is quoted string, unwrap? Check if labelTokens is single STRING already handled, but rawSlice includes quotes - we can unwrap if needed
-                            // For uniform handling, if labelTokens length==1 && labelTokens[0].type==="STRING", use decoded lexeme. But we already handled that branch.
-                            // Here we are in non-STRING branch, so rawSlice may contain quoted? We'll keep as trimmed raw (preserve quotes if any) or strip outer quotes if detected
-                            // If the raw trimmed starts with " and ends with ", strip? But we would have tokenized string as STRING, not raw, so not here.
-                            // So just keep trimmed.
                             label = trimmed;
                             labelRange = {
                                 start: firstTok.range.start,
                                 end: lastTok.range.end,
                             };
-                            edgeEnd = lastTok.range.end;
+                            labelEndPos = lastTok.range.end;
                         }
                     }
                 }
@@ -986,20 +1129,56 @@ export class Parser {
             this.diagnostics.push(diag("error", this.codeForUnexpected(extra), `Unexpected token '${extra.lexeme}' after edge`, extra.range));
             this.synchronize();
         }
-        const edgeRange = {
-            start: sourceTok.range.start,
-            end: edgeEnd,
-        };
-        this.edges.push({
-            source: sourceTok.lexeme,
-            target: targetTok.lexeme,
-            label,
-            kind,
-            range: edgeRange,
-            sourceRange: sourceTok.range,
-            targetRange: targetTok.range,
-            labelRange,
+        // Expand segments: cross product per step, chained through each target list.
+        // A label applies to the last segment only.
+        // An explicit `ID:` prefix needs exactly one edge.
+        if (explicitId !== null) {
+            const multiSource = sources.length > 1;
+            const multiSeg = segments.length > 1 || (segments[0] && segments[0].targets.length > 1);
+            if (multiSource || multiSeg) {
+                this.diagnostics.push(diag("error", "E005", `Explicit edge id '${explicitId}' requires a single edge: no lists or chaining (use one 'A -> B' per id)`, explicitIdRange));
+                this.synchronize();
+                return;
+            }
+        }
+        let currentSources = sources;
+        const seenIds = new Set<string>(sources.map((s: any) => s.lexeme));
+        segments.forEach((seg: any, segIdx: number) => {
+            const isLast = segIdx === segments.length - 1;
+            const segLabel = isLast ? label : undefined;
+            const segLabelRange = isLast ? labelRange : undefined;
+            for (const s of currentSources) {
+                for (const t of seg.targets) {
+                    seenIds.add(t.lexeme);
+                    const useEnd = (isLast && colonPresent && labelEndPos) ? labelEndPos : t.range.end;
+                    const startPos = explicitId !== null && segIdx === 0 ? explicitIdRange.start : s.range.start;
+                    const edgeRange = {
+                        start: startPos,
+                        end: useEnd,
+                    };
+                    this.edges.push({
+                        id: explicitId !== null ? explicitId : "",
+                        source: s.lexeme,
+                        target: t.lexeme,
+                        label: segLabel,
+                        kind: seg.kind,
+                        range: edgeRange,
+                        sourceRange: s.range,
+                        targetRange: t.range,
+                        labelRange: segLabelRange,
+                        idRange: explicitId !== null ? explicitIdRange : undefined,
+                    });
+                }
+            }
+            currentSources = seg.targets;
         });
+        // Edge endpoints inside a group belong to it, including implicit nodes.
+        const cur = this.currentGroup();
+        if (cur) {
+            for (const id of seenIds) {
+                if (!cur.nodeIds.includes(id)) cur.nodeIds.push(id);
+            }
+        }
     }
 }
 /**

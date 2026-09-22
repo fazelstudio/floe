@@ -1,0 +1,7 @@
+API [service]
+Cache [store]
+API -> Cache
+
+meta API.fill = "#dbeafe"
+meta API.strokeWidth = "2"
+meta API.owner = "payments-team"

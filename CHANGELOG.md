@@ -2,6 +2,36 @@
 
 All notable changes to Floe follow [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-09-22
+
+Portable advance. No new deps, no breaking changes — v1.0/v1.1 files parse identically.
+
+### Added
+- Named edges `E1: A -> B : ok` (single edge only) + deterministic auto ids `e1..eN`
+  (collision-free vs node/group ids); `note E1` / `link E1` may target edges.
+- Scoped metadata `meta Target.key = "value"` (dot, no new keywords): style keys
+  (`fill`, `stroke`, `strokeWidth`, `fontSize`, `fontColor`, `opacity`) override
+  rendering in any environment; other keys become per-element custom metadata.
+- Per-element `link` resolution for nodes/edges/groups; edge paths render clickable.
+- Editor sub-ranges (`typeRange`/`labelRange`/`idRange`); hover/symbols/definition/
+  rename understand edge ids; completion after `meta Target.`; `E015` duplicate
+  edge id (+ collisions); `E013` for bad style values; `E014` for unknown scoped targets.
+- Portability contract + tests: zero-`node:`/DOM core (CLI/LSP/optional dagre excluded),
+  deterministic cross-runtime output, XSS-safe styles/links/labels.
+
+## [1.1.0] - 2026-09-22
+
+Global-ready additive expansion. Goal preserved: easy, lightweight, complex. No migration — v1.0 files parse identically.
+
+### Added
+- Edge operators `<->` (bidirectional, dual markers) and `==>` / `=>` (emphasis, 2.8px). Ranking treats all as directed for determinism.
+- Chaining `A -> B -> C` (mixed ops allowed), label after `:` applies to last segment.
+- Fan-in/out `A -> B, C`, `A, B -> C`, `A, B -> C, D` (cross product, shared label for single segment).
+- Node shapes `ellipse`, `circle`, `cloud` (total 20 kinds, unknown falls back to default).
+- Themes via `meta theme="light|dark|auto"`, `meta background/font/accent`, auto legend `meta legend="true"`, provenance `meta author/version`. CLI `floe init` + `render --theme/--background/--font`.
+- Layout: group-clustered ordering + barycenter crossing reduction + backward elbow bypass + parallel offsets (ungrouped order unchanged).
+- Docs `docs/02-syntax.md`, `04-rendering.md`, `05-layout.md`, `07-formatting.md`, `10-cli.md`, `12-examples.md`, examples `showcase-v1-1/decision-tree/microservices.floe`, corpus `edge-cases/{bidirectional,emphasis,chaining,fanout}.floe`, `metadata/theme-legend.floe`.
+
 ## [1.0.0] - 2026-09-05
 
 Initial stable open source release.

@@ -1,4 +1,4 @@
-# Floe — Examples (v1.0)
+# Floe — Examples
 
 All examples are canonical (formatted) and have `error`-free diagnostics.
 
@@ -26,6 +26,21 @@ Login -> Dashboard : success
 Login -> Error : invalid credentials
 A -- B : associated
 X -> Y : "quoted label"
+```
+
+## Chaining, Fan-in, Fan-out
+```floe
+A -> B -> C
+API -> Worker, Cache : fan-out
+User, Admin -> Login
+```
+
+## Named Edges + Styles
+```floe
+E1: Gateway -> Cache : warm
+note E1 "warms on deploy"
+link E1 "https://api.example.com/cache"
+meta Gateway.fill = "#dbeafe"
 ```
 
 ## Node Types
@@ -96,4 +111,4 @@ Cache [service]
 API -> API : self-loop
 ```
 
-See `corpus/basic/*`, `corpus/groups/*`, `corpus/metadata/*` for more and `examples/` for runnable files.
+See `corpus/basic/*`, `corpus/groups/*`, `corpus/metadata/*`, `corpus/edge-cases/*` for more and `examples/` for runnable files (`hello`, `auth-flow`, `groups`, `metadata`, `edge-cases`, `decision-tree`, `microservices`, `showcase-v1-1`, `styled`).

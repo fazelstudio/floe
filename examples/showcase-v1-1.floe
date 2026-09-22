@@ -1,0 +1,37 @@
+// Floe v1.1 showcase — chaining, fan-out, bidirectional, emphasis, themes
+direction LR
+meta title = "Floe v1.1 Showcase"
+meta description = "Chaining, fan-out, bidirectional, emphasis, groups, legend"
+meta theme = "auto"
+meta legend = "true"
+meta author = "Floe"
+meta version = "1.1.0"
+
+User [person] "End User"
+Login
+Dashboard
+Error
+API [service] "Gateway"
+Worker
+Cache
+Critical
+Alert
+Start [start] "Begin"
+Check [decision]
+OK [end]
+Retry [process]
+
+User -> Login -> Dashboard : success
+Login -> Error : invalid
+API -> Worker, Cache : fan-out
+Cache <-> API : sync
+Critical ==> Alert : hot path
+Start -> Check -> OK : yes
+Check -> Retry : no
+
+group Backend "Services" {
+  API -> Worker : rpc
+}
+
+note API "Handles auth"
+link API "https://api.example.com"

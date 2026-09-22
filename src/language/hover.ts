@@ -22,20 +22,16 @@ function parseFloe(source) {
 export function getHover(source, offset) {
     const tokens = tokenize(source);
     const tok = getTokenAtOffset(tokens, offset);
-    // Also handle offset at end where token may be before?
     let word = "";
     let targetToken = tok;
     if (!tok) {
-        // Try finding token before offset if cursor at word boundary
-        // Use word detection fallback
+        // A cursor in whitespace right after an identifier still hovers that identifier.
         const ch = source[offset];
         if (ch === undefined || /\s/.test(ch)) {
-            // maybe hovering between tokens not on identifier -> no hover
-            // Try token before
+            // Accept the identifier directly before the cursor on the same line.
             for (let i = tokens.length - 1; i >= 0; i--) {
                 const t = tokens[i];
                 if (t.range.end.offset <= offset && t.type === "IDENT") {
-                    // only if close proximity? Check line
                     const pos = positionAt(source, offset);
                     const tPos = t.range.end;
                     if (tPos.line === pos.line && offset - t.range.end.offset <= 1) {
@@ -51,7 +47,7 @@ export function getHover(source, offset) {
             return null;
         }
     }
-    // Only provide hover for identifiers and keywords? For simplicity focus on IDENT, also GROUP_KW etc?
+    // Hover covers identifiers; keywords and strings get a one-line summary.
     if (!targetToken || targetToken.type !== "IDENT") {
         if (targetToken && (targetToken.type === "DIRECTION_KW" || targetToken.type === "GROUP_KW" || targetToken.type === "META_KW" || targetToken.type === "NOTE_KW" || targetToken.type === "LINK_KW")) {
             return {
@@ -68,8 +64,28 @@ export function getHover(source, offset) {
         return null;
     }
     word = targetToken.lexeme;
-    // Parse diagram for semantic info
     const { diagram } = parseFloe(source);
+    const edgeOp = (k) => k === "directed" ? "->" : k === "undirected" ? "--" : k === "bidirectional" ? "<->" : "==>";
+    // Explicit edge ids (`E1: A -> B`) resolve before node/group lookup.
+    const namedEdge = diagram.edges.find((e) => e.id === word && e.idRange);
+    if (namedEdge) {
+        const contents = [];
+        contents.push(`**Edge \`${namedEdge.id}\`**`);
+        contents.push(`${namedEdge.source} ${edgeOp(namedEdge.kind)} ${namedEdge.target}${namedEdge.label ? ` : ${namedEdge.label}` : ""}`);
+        if (namedEdge.kind)
+            contents.push(`Kind: \`${namedEdge.kind}\``);
+        if (namedEdge.style && Object.keys(namedEdge.style).length > 0)
+            contents.push(`Style: ${JSON.stringify(namedEdge.style)}`);
+        if (namedEdge.metadata && Object.keys(namedEdge.metadata).length > 0)
+            contents.push(`Metadata: ${JSON.stringify(namedEdge.metadata)}`);
+        const anns = diagram.annotations.filter((a) => a.target === word);
+        if (anns.length > 0)
+            contents.push(`Annotations: ${anns.map((a) => `"${a.text}"`).join(", ")}`);
+        const elink = namedEdge.link ?? diagram.links.find((l) => l.target === word)?.url;
+        if (elink)
+            contents.push(`Link: ${elink}`);
+        return { contents, range: targetToken.range };
+    }
     // Find node where id == word
     const node = diagram.nodes.find((n) => n.id === word);
     const group = findGroup(diagram.groups, word);
@@ -87,13 +103,13 @@ export function getHover(source, offset) {
             contents.push(`Label: "${node.id}" (default)`);
         // incoming/outgoing
         if (outgoing.length > 0) {
-            contents.push(`Outgoing: ${outgoing.map((e) => `${e.source} ${e.kind === "directed" ? "->" : "--"} ${e.target}${e.label ? ` : ${e.label}` : ""}`).join(", ")}`);
+            contents.push(`Outgoing: ${outgoing.map((e) => `${e.source} ${edgeOp(e.kind)} ${e.target}${e.label ? ` : ${e.label}` : ""}`).join(", ")}`);
         }
         else {
             contents.push(`Outgoing: (none)`);
         }
         if (incoming.length > 0) {
-            contents.push(`Incoming: ${incoming.map((e) => `${e.source} ${e.kind === "directed" ? "->" : "--"} ${e.target}${e.label ? ` : ${e.label}` : ""}`).join(", ")}`);
+            contents.push(`Incoming: ${incoming.map((e) => `${e.source} ${edgeOp(e.kind)} ${e.target}${e.label ? ` : ${e.label}` : ""}`).join(", ")}`);
         }
         else {
             contents.push(`Incoming: (none)`);
@@ -103,12 +119,11 @@ export function getHover(source, offset) {
         if (membership.length > 0) {
             contents.push(`Groups: ${membership.map((g) => g.id).join(", ")}`);
         }
-        // Diagram-level metadata relevant? Show all diagram metadata
+        // Diagram-level metadata applies to every node.
         if (diagram.metadata && Object.keys(diagram.metadata).length > 0) {
             contents.push(`Diagram metadata: ${JSON.stringify(diagram.metadata)}`);
         }
         if (group && group.metadata && Object.keys(group.metadata).length > 0) {
-            // shouldn't both node and group same id? but show
             contents.push(`Group metadata: ${JSON.stringify(group.metadata)}`);
         }
         // Annotations for this node
@@ -116,9 +131,15 @@ export function getHover(source, offset) {
         if (anns.length > 0) {
             contents.push(`Annotations: ${anns.map((a) => `"${a.text}"`).join(", ")}`);
         }
-        const link = diagram.links.find((l) => l.target === word);
+        const link = node.link ?? diagram.links.find((l) => l.target === word);
         if (link) {
-            contents.push(`Link: ${link.url}`);
+            contents.push(`Link: ${typeof link === "string" ? link : link.url}`);
+        }
+        if (node.style && Object.keys(node.style).length > 0) {
+            contents.push(`Style: ${JSON.stringify(node.style)}`);
+        }
+        if (node.metadata && Object.keys(node.metadata).length > 0) {
+            contents.push(`Metadata: ${JSON.stringify(node.metadata)}`);
         }
         return { contents, range: targetToken.range };
     }
@@ -138,28 +159,28 @@ export function getHover(source, offset) {
             contents.push(`Nested groups: ${group.groups.map((g) => g.id).join(", ")}`);
         if (group.metadata && Object.keys(group.metadata).length > 0)
             contents.push(`Metadata: ${JSON.stringify(group.metadata)}`);
+        if (group.style && Object.keys(group.style).length > 0)
+            contents.push(`Style: ${JSON.stringify(group.style)}`);
         if (group.annotations.length > 0)
             contents.push(`Annotations: ${group.annotations.map((a) => `"${a.text}"`).join(", ")}`);
         if (group.link)
             contents.push(`Link: ${group.link}`);
-        // Incoming/outgoing edges for group? maybe count edges where node in group participates?
-        // For now show edges where source/target is group id (rare)
+        // Edges that mention the group id directly (rare).
         if (incoming.length > 0)
             contents.push(`Incoming edges: ${incoming.length}`);
         if (outgoing.length > 0)
             contents.push(`Outgoing edges: ${outgoing.length}`);
         return { contents, range: targetToken.range };
     }
-    // Check if identifier is referenced in edges but not declared as node (implicit)
+    // Identifiers used only inside edges describe implicit nodes.
     if (incoming.length > 0 || outgoing.length > 0) {
         const contents = [];
         contents.push(`**Node \`${word}\`** (implicit)`);
-        contents.push(`Outgoing: ${outgoing.map((e) => `${e.source} -> ${e.target}`).join(", ") || "(none)"}`);
-        contents.push(`Incoming: ${incoming.map((e) => `${e.source} -> ${e.target}`).join(", ") || "(none)"}`);
+        contents.push(`Outgoing: ${outgoing.map((e) => `${e.source} ${edgeOp(e.kind)} ${e.target}`).join(", ") || "(none)"}`);
+        contents.push(`Incoming: ${incoming.map((e) => `${e.source} ${edgeOp(e.kind)} ${e.target}`).join(", ") || "(none)"}`);
         return { contents, range: targetToken.range };
     }
-    // Check metadata key hover?
-    // If word appears as metadata key, show value
+    // Diagram-level metadata keys.
     if (diagram.metadata && diagram.metadata[word] !== undefined) {
         return {
             contents: [`Metadata \`${word}\` = "${diagram.metadata[word]}"`],

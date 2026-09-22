@@ -9,7 +9,8 @@
  * Exports marked @internal are deprecated and may be hidden in 2.0 — prefer stable wrappers.
  */
 export { rangeToString } from "./range.js"; // utility, stable
-export { DEFAULT_DIRECTION, DIRECTIONS, IDENTIFIER_RE, isValidIdentifier, } from "./types.js";
+export { DEFAULT_DIRECTION, DIRECTIONS, IDENTIFIER_RE, isValidIdentifier, STYLE_KEYS, isStyleKey, } from "./types.js";
+export type { Direction, EdgeKind, FloeStyle, StyleKey, FloeNode, FloeEdge, FloeGroup, FloeAnnotation, FloeLink, FloeDiagram, ParseResult, } from "./types.js";
 // ── Stable: high-level parse API ──
 // parseFloe is the recommended entry; parse is alias; parseRaw is raw without validation (stable).
 // Parser class and Lexer are low-level and considered @internal/low-level (still exported for tooling compat).

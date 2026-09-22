@@ -33,10 +33,9 @@ export function positionAt(source, offset) {
     return { line, column, offset: off };
 }
 export function offsetAt(source, pos) {
-    // If offset is already provided trust it
+    // A carried offset is authoritative; otherwise derive it from line/column.
     if (typeof pos.offset === "number")
         return pos.offset;
-    // else compute via line/col
     let line = 1;
     let column = 1;
     let offset = 0;
@@ -70,12 +69,11 @@ export function getLineCount(source) {
         return 1;
     return source.split(/\r?\n/).length;
 }
-/** Return token that contains offset, or nearest before offset */
+/** Return the token containing offset, if any. */
 export function getTokenAtOffset(tokens, offset) {
     for (const t of tokens) {
         if (t.range.start.offset <= offset && offset < t.range.end.offset)
             return t;
-        // Also handle cursor exactly at end (between tokens) -> return previous token? but not inside
     }
     return undefined;
 }
@@ -116,16 +114,6 @@ export function tokenizeSource(source) {
 }
 /** Helpers to get lines with offsets */
 export function getLineStartOffset(source, lineNumber) {
-    const lines = source.split(/\r?\n/);
-    let offset = 0;
-    for (let i = 1; i < lineNumber; i++) {
-        const line = lines[i - 1] ?? "";
-        offset += line.length;
-        // add newline length (detect original). Our split lost delimiter, approximate as 1 for \n, 2 for \r\n? But we can compute by searching.
-        // Instead compute by iterating source to find nth newline.
-        // Simpler: use positionAt inverse? We'll compute via scanning source.
-    }
-    // fallback scan
     let curLine = 1;
     let curOffset = 0;
     while (curOffset < source.length && curLine < lineNumber) {

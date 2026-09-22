@@ -21,15 +21,16 @@ import { runCheck } from "./check.js";
 import { runFormat } from "./format.js";
 import { runRender } from "./render.js";
 
-const VERSION = "1.0.0";
+const VERSION = "1.2.0";
 
 function printHelp(): void {
-  console.log(`Floe ${VERSION} — diagram DSL
+  console.log(`Floe ${VERSION} — diagram DSL (lightweight, human-readable, AI-friendly)
 
 Usage:
   floe <command> [options] <file...>
 
 Commands:
+  init    Scaffold a new .floe starter file
   check   Validate a .floe file and print diagnostics
   format  Format file using canonical formatter
   render  Produce SVG output
@@ -39,6 +40,10 @@ Commands:
 Options:
   -h, --help     Show help
   -v, --version  Show version
+
+Init:
+  floe init [diagram.floe]
+    Creates a starter file (refuses to overwrite existing).
 
 Check:
   floe check diagram.floe [--json] [--quiet]
@@ -52,8 +57,11 @@ Format:
     (default: print formatted content to stdout)
 
 Render:
-  floe render diagram.floe [-o output.svg]
+  floe render diagram.floe [-o output.svg] [--theme light|dark|auto] [--background <color>] [--font <family>]
     -o, --output <file>  Write SVG to file (default: stdout)
+    --theme <t>          Override meta theme (light/dark/auto)
+    --background <c>     Override background (color or transparent)
+    --font <f>           Override font family
 
 LSP:
   floe lsp [--stdio]
@@ -65,12 +73,29 @@ Exit codes:
   2  usage or file error
 
 Examples:
+  floe init my-flow.floe
   floe check diagram.floe
   floe format diagram.floe --write
-  floe render diagram.floe -o diagram.svg
+  floe render diagram.floe -o diagram.svg --theme dark
   floe lsp
 
-Docs: SPEC.md
+Syntax (additive, old files still valid):
+  direction LR
+  User [person] "End User"
+  User -> Login -> Dashboard : success
+  API -> Worker, Cache : fan-out
+  Cache <-> API : sync (bidirectional)
+  Critical ==> Alert : hot path (emphasis)
+  E1: Gateway -> Cache : warm (named edge)
+  meta Gateway.fill = "#dbeafe" (per-element style)
+  group Backend "Services" { API -> Worker : rpc }
+  meta title = "My Flow"
+  meta theme = "auto"   // light|dark|auto
+  meta legend = "true"
+  note API "Handles auth"
+  link API "https://api.example.com"
+
+Docs: SPEC.md + docs/02-syntax.md
 `);
 }
 
@@ -99,6 +124,21 @@ function parseArgs(argv: string[]): { command?: string; files: string[]; opts: R
     else if (a === "--write" || a === "-w") { opts.write = true; i++; }
     else if (a === "--check" || a === "-c") { opts.check = true; i++; }
     else if (a === "--stdio") { opts.stdio = true; i++; }
+    else if (a === "--theme") {
+      const next = rest[i + 1];
+      if (!next || !["light", "dark", "auto"].includes(next)) { console.error(`floe ${command}: --theme must be light|dark|auto`); process.exit(2); }
+      opts.theme = next; i += 2;
+    }
+    else if (a === "--background") {
+      const next = rest[i + 1];
+      if (!next) { console.error(`floe ${command}: missing value for ${a}`); process.exit(2); }
+      opts.background = next; i += 2;
+    }
+    else if (a === "--font") {
+      const next = rest[i + 1];
+      if (!next) { console.error(`floe ${command}: missing value for ${a}`); process.exit(2); }
+      opts.font = next; i += 2;
+    }
     else if (a === "-o" || a === "--output") {
       const next = rest[i + 1];
       if (!next) { console.error(`floe ${command}: missing value for ${a}`); process.exit(2); }
@@ -114,6 +154,53 @@ function parseArgs(argv: string[]): { command?: string; files: string[]; opts: R
   return { command, files, opts };
 }
 
+function runInit(files: string[]): number {
+  const target = files[0] ?? "diagram.floe";
+  const resolved = path.resolve(target);
+  if (fs.existsSync(resolved)) {
+    console.error(`floe init: file already exists: ${target} (refusing to overwrite)`);
+    return 2;
+  }
+  const template = `// Floe v1.1 — starter (lightweight, human-readable, AI-friendly)
+direction LR
+meta title = "My Flow"
+meta theme = "auto"
+meta legend = "true"
+
+User [person] "End User"
+Login
+Dashboard
+API [service] "Gateway"
+Worker
+Cache
+Critical
+Alert
+
+User -> Login -> Dashboard : success
+API -> Worker, Cache : fan-out
+Cache <-> API : sync
+Critical ==> Alert : hot path
+
+group Backend "Services" {
+  API -> Worker : rpc
+}
+
+note API "Handles auth"
+link API "https://api.example.com"
+`;
+  try {
+    const dir = path.dirname(resolved);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(resolved, template, "utf-8");
+    console.log(`created ${path.relative(process.cwd(), resolved)}`);
+    return 0;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`floe init: cannot write '${target}': ${msg}`);
+    return 2;
+  }
+}
+
 async function main(): Promise<void> {
   const { command, files, opts } = parseArgs(process.argv);
   if (!command) { printHelp(); process.exit(2); }
@@ -123,9 +210,10 @@ async function main(): Promise<void> {
   if (opts.version) { printVersion(); process.exit(0); }
   let exitCode = 0;
   switch (command) {
+    case "init": { exitCode = runInit(files); break; }
     case "check": { exitCode = runCheck(files, { json: !!opts.json, quiet: !!opts.quiet }); break; }
     case "format": { exitCode = runFormat(files, { write: !!opts.write, check: !!opts.check, json: !!opts.json }); break; }
-    case "render": { exitCode = runRender(files, { output: opts.output, json: !!opts.json }); break; }
+    case "render": { exitCode = runRender(files, { output: opts.output, json: !!opts.json, theme: opts.theme, background: opts.background, font: opts.font }); break; }
     case "lsp":
     case "lsp-server": {
       const { startLspServer } = await import("../lsp/server.js");

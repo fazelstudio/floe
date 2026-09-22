@@ -29,13 +29,11 @@ export function getSymbols(source) {
             detail: diagram.direction,
         });
     }
-    // Top-level groups hierarchical
+    // Nodes inside groups already appear as group children,
+    // so only ungrouped nodes become top-level symbols.
     for (const grp of diagram.groups) {
         symbols.push(groupToSymbol(grp));
     }
-    // Nodes (flattened). Provide as top-level symbols if not already contained in group's symbol children.
-    // For outline, we already embed node symbols inside group symbols via children.
-    // But also provide flat list for nodes not in groups.
     const groupedNodeIds = new Set();
     function collectGroupedIds(groups) {
         for (const g of groups) {
@@ -46,9 +44,6 @@ export function getSymbols(source) {
     }
     collectGroupedIds(diagram.groups);
     for (const node of diagram.nodes) {
-        // Skip if node is already represented inside group children (avoid duplicate)
-        // We'll still add but mark as nested? For symbol provider, flat is okay.
-        // Decide: only add nodes NOT in any group as top-level; grouped nodes appear inside group children.
         if (groupedNodeIds.has(node.id))
             continue;
         symbols.push({
@@ -58,20 +53,15 @@ export function getSymbols(source) {
             detail: node.type ? `[${node.type}]${node.label ? ` "${node.label}"` : ""}` : node.label ? `"${node.label}"` : undefined,
         });
     }
-    // Edges as symbols
+    // Edges as symbols (stable id first when explicit)
     for (const edge of diagram.edges) {
+        const op = edge.kind === "directed" ? "->" : edge.kind === "undirected" ? "--" : edge.kind === "bidirectional" ? "<->" : "==>";
         symbols.push({
-            name: `${edge.source} ${edge.kind === "directed" ? "->" : "--"} ${edge.target}`,
+            name: edge.idRange ? `${edge.id}: ${edge.source} ${op} ${edge.target}` : `${edge.source} ${op} ${edge.target}`,
             kind: "edge",
             range: edge.range,
             detail: edge.label ? `: ${edge.label}` : undefined,
         });
-    }
-    // Metadata
-    for (const [k, v] of Object.entries(diagram.metadata)) {
-        // No range stored precisely, omit or use directionRange? Skip range for metadata top-level? Use dummy.
-        // For now not add symbols for metadata at top level unless we have range.
-        // We have no per-meta range except global, so skip symbol for metadata to keep ranges accurate.
     }
     for (const ann of diagram.annotations) {
         if (!ann.target) {
@@ -99,13 +89,12 @@ function groupToSymbol(g) {
     for (const child of g.groups) {
         children.push(groupToSymbol(child));
     }
-    // Add member nodes as children (need node objects; but we have only ids. We'll lookup not needed; we can create placeholder symbols)
+    // Member nodes use the group range; only ids are stored here.
     for (const nid of g.nodeIds) {
-        // Need to find node range - but we don't have here; we could create symbol with range same as group? Better fetch from diagram? For now use group range subset.
         children.push({
             name: nid,
             kind: "node",
-            range: g.range, // approximate; ideal would be node range but we don't have.
+            range: g.range,
             detail: "member",
         });
     }
@@ -143,7 +132,7 @@ function groupToSymbol(g) {
         children: children.length > 0 ? children : undefined,
     };
 }
-/** Provides flat list (non-hierarchical) for simpler testing */
+/** Flat symbol list (non-hierarchical). */
 export function getFlatSymbols(source) {
     const hierarchical = getSymbols(source);
     const flat = [];

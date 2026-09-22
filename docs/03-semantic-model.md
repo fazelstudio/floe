@@ -1,19 +1,26 @@
-# Floe — Semantic Model (IR) (v1.0)
+# Floe — Semantic Model (IR)
 
 Renderer-independent, no coordinates/svg/layout.
 
 ```ts
 type Direction = "TB" | "BT" | "LR" | "RL";
-type EdgeKind = "directed" | "undirected"; // "->" vs "--"
+type EdgeKind = "directed" | "undirected" | "bidirectional" | "emphasis";
+interface FloeStyle { fill?; stroke?; strokeWidth?; fontSize?; fontColor?; opacity? }
 
 interface FloeNode {
   id: string;        // IDENT, internal key
   label?: string;    // display, quoted STRING or defaults to id
   type?: string;     // semantic type e.g., person/service/database, not CSS
   range: Range;      // source range covering declaration
+  typeRange?: Range; // sub-range of `[type]`
+  labelRange?: Range;// sub-range of `"label"`
+  style?: FloeStyle; // via `meta ID.fill = "..."`
+  metadata?: Record<string,string>; // via `meta ID.key` (non-style keys)
+  link?: string;     // resolved from `link ID "..."`
 }
 
 interface FloeEdge {
+  id: string;        // explicit `E1:` or deterministic auto `e1..eN`
   source: string;
   target: string;
   label?: string;    // free-form after colon, may contain spaces
@@ -22,6 +29,10 @@ interface FloeEdge {
   sourceRange: Range;
   targetRange: Range;
   labelRange?: Range;
+  idRange?: Range;   // sub-range of explicit `ID:` prefix
+  style?: FloeStyle;
+  metadata?: Record<string,string>;
+  link?: string;
 }
 
 interface FloeGroup {
@@ -29,16 +40,19 @@ interface FloeGroup {
   label?: string;
   type?: string;
   range: Range;
+  typeRange?: Range;
+  labelRange?: Range;
   nodeIds: string[]; // direct members (not counting nested subgroup members)
   groups: FloeGroup[]; // nested, tree
   metadata: Record<string,string>;
   annotations: FloeAnnotation[];
   link?: string;     // url if link target is this group
   parentId?: string;
+  style?: FloeStyle; // via `meta G.fill = "..."`
 }
 
 interface FloeAnnotation {
-  target?: string; // undefined = diagram-level, else node/group id
+  target?: string; // undefined = diagram-level, else node/group/edge id
   text: string;
   range: Range;
 }

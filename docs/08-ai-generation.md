@@ -1,4 +1,4 @@
-# Floe — AI Generation (v1.0)
+# Floe — AI Generation
 
 Concise reference for AI systems to generate `.floe` reliably.
 
@@ -6,9 +6,9 @@ Concise reference for AI systems to generate `.floe` reliably.
 ```ebnf
 direction ::= "direction" ("TB"|"BT"|"LR"|"RL")
 node      ::= IDENT ("[" IDENT "]")? (STRING)?   // IDENT = [A-Za-z_][A-Za-z0-9_-]*, no spaces, no digit start
-edge      ::= IDENT ("->"|"--") IDENT (":" Label)? // Label trimmed, non-empty, may contain spaces; "->" directed, "--" undirected
+edge      ::= (IDENT ":")? IDENT ("," IDENT)* (("->"|"--"|"<->"|"==>"|"=>") IDENT ("," IDENT)*)+ (":" Label)? // Label trimmed, non-empty; chaining A->B->C, fan-out A->B,C
 group     ::= "group" IDENT ("[" IDENT "]")? (STRING)? "{" ... "}"
-meta      ::= "meta" IDENT "=" STRING
+meta      ::= "meta" IDENT ("." IDENT)? "=" STRING   // meta Target.key styles single elements
 note      ::= "note" (IDENT)? STRING
 link      ::= "link" IDENT STRING
 Reserved: direction, group, meta, note, link cannot be bare ids.
@@ -24,17 +24,19 @@ Valid example:
   meta author = "Alice"
   note API "Handles auth"
   link API "https://example.com"
-Invalid to avoid: 123bad, A ->, A -> B :, direction lr, User [].
+Invalid to avoid: 123bad, A ->, A -> B :, direction lr, User [], E1: A -> B, C.
 ```
 
 ## Generation Rules
 - Use `direction LR` for left-to-right, `TB` for top-to-bottom; omit for default `TB`.
 - Node ids are internal keys: `^[A-Za-z_][A-Za-z0-9_-]*$`, case-sensitive, use hyphen/underscore for multi-word: `api-gateway`, not `API Gateway`.
 - Display text is `STRING` after node: `API [service] "API Gateway"` — never put spaces in id.
-- Edge `->` is directed, `--` is undirected association; label after single `:` (trimmed): `User -> Login : success`.
+- Edge `->` is directed, `--` is undirected association, `<->` is bidirectional, `==>` is emphasis; label after single `:` (trimmed): `User -> Login : success`.
+- Chains (`A -> B -> C`) and lists (`A -> B, C`) expand to multiple edges; a label covers the last segment.
+- Named edges (`E1: A -> B`) are single-edge only and addressable by `note`/`link`/`meta`.
 - Groups use braces and indent 2 spaces inside; they may nest.
-- `meta` is semantic key-value only — `meta author = "Alice"` — no CSS/JS.
-- `note TARGET "text"` attaches; `note "text"` is diagram-level.
+- `meta author = "Alice"` is diagram metadata; `meta API.fill = "#fff"` styles one element (style keys: fill, stroke, strokeWidth, fontSize, fontColor, opacity; other keys are custom data).
+- `note TARGET "text"` attaches (targets: node, group, or edge id); `note "text"` is diagram-level.
 - `link TARGET "https://..."` — target must exist, use safe `https:` only (no `javascript:`).
 - Reserved keywords cannot be node ids: `direction`, `group`, `meta`, `note`, `link`.
 
@@ -80,8 +82,8 @@ Group [bad               // E006 missing ]
 ```
 
 ## Semantic Model Summary
-- Diagram has `direction`, `nodes` (explicit+implicit deduped), `edges` (with `kind`), `groups` (tree), `metadata`, `annotations`, `links`.
-- Validation rules: duplicate node `E003`, duplicate group `E011`, unclosed group `E012`, invalid meta `E013`, unknown annotation/link target `E014`.
+- Diagram has `direction`, `nodes` (explicit+implicit deduped), `edges` (with `kind` + stable `id`), `groups` (tree), `metadata`, `annotations`, `links`.
+- Validation rules: duplicate node `E003`, duplicate group `E011`, unclosed group `E012`, invalid meta `E013`, unknown annotation/link target `E014`, duplicate edge id `E015`.
 
 ## Validation Rules to Follow
 - Generate ids matching `IDENTIFIER_RE`, quote display strings, keep edge labels non-empty, close every `group` with `}`, define a node before `note`/`link` targets it, use exactly one `direction`.

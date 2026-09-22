@@ -1,0 +1,33 @@
+// Microservices — groups cluster, bidir sync, emphasis for critical path
+direction LR
+meta title = "Checkout Microservices"
+meta theme = "auto"
+meta legend = "true"
+meta author = "Platform Team"
+meta version = "2.4.0"
+
+Client [client] "Web App"
+Gateway [gateway]
+Auth
+Cart
+Orders
+Payment
+Receipt
+Ledger
+
+Client -> Gateway -> Auth, Cart, Orders
+Auth <-> Gateway : session
+Cart -> Orders -> Payment ==> Receipt : critical
+Payment -- Ledger : reconcile
+
+group Edge "Gateway" {
+  Gateway -> Auth : session
+}
+
+group Core "Orders" {
+  Cart -> Orders : add
+  Orders -> Payment : pay
+}
+
+note Payment "PCI scope"
+link Gateway "https://api.example.com/gateway"
